@@ -29,3 +29,7 @@ data/logs/
 Thumbs.db
 .idea/
 .vscode/
+
+# Borrowed reference repos (cloned for study; huge, never commit their contents)
+借鉴/*/*
+!借鉴/*/_LICENSE_NOTES.md
