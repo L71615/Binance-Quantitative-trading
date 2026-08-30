@@ -1,0 +1,31 @@
+# Python
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Node / Vite
+web/node_modules/
+web/dist/
+web/.vite/
+web/.env.local
+
+# Runtime data
+data/app.db
+data/app.db-*
+data/logs/
+*.log
+
+# Secrets / local config
+.env
+.env.local
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
