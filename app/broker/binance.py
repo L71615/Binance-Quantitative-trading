@@ -49,8 +49,11 @@ class BinanceClient:
         q = params or {}
         if signed:
             q = self._signed(q)
-        if method.upper() == "GET":
+        verb = method.upper()
+        if verb == "GET":
             return self._http.get(path, params=q, headers=headers)
+        if verb == "DELETE":
+            return self._http.delete(path, params=q, headers=headers)
         return self._http.post(path, params=q, headers=headers)
 
     def get_server_time(self) -> int:

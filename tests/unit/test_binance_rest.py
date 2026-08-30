@@ -47,6 +47,7 @@ def test_place_order_sends_signed_request(monkeypatch):
     captured = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
+        captured["method"] = request.method
         captured["path"] = request.url.path
         captured["params"] = dict(request.url.params)
         return httpx.Response(200, json={"orderId": 1, "status": "NEW"})
@@ -55,10 +56,31 @@ def test_place_order_sends_signed_request(monkeypatch):
     r = c.place_order(
         "BTCUSDT", "BUY", "LIMIT", quantity=0.001, price=30000.0
     )
+    assert captured["method"] == "POST"
     assert captured["path"] == "/api/v3/order"
     assert captured["params"]["symbol"] == "BTCUSDT"
     assert captured["params"]["side"] == "BUY"
     assert captured["params"]["type"] == "LIMIT"
     assert captured["params"]["signature"]  # present
     assert r["status"] == "NEW"
+    c.close()
+
+
+def test_cancel_order_sends_delete_request(monkeypatch):
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["method"] = request.method
+        captured["path"] = request.url.path
+        captured["params"] = dict(request.url.params)
+        return httpx.Response(200, json={"orderId": 1, "status": "CANCELED"})
+
+    c = _make_client(handler)
+    r = c.cancel_order("BTCUSDT", 1)
+    assert captured["method"] == "DELETE"
+    assert captured["path"] == "/api/v3/order"
+    assert captured["params"]["symbol"] == "BTCUSDT"
+    assert captured["params"]["orderId"] == "1"
+    assert captured["params"]["signature"]  # present
+    assert r["status"] == "CANCELED"
     c.close()
