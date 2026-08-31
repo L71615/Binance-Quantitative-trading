@@ -15,6 +15,7 @@ from app.api.routers import klines as klines_router
 from app.api.routers import orders as orders_router
 from app.api.routers import setup as setup_router
 from app.api.routers import settings as settings_router
+from app.api.routers import symbols as symbols_router
 from app.api.routers import trades as trades_router
 from app.db import Base, SessionLocal, engine
 from app.engine.lifecycle import lifecycle
@@ -73,6 +74,7 @@ app.include_router(klines_router.router)
 app.include_router(orders_router.router)
 app.include_router(trades_router.router)
 app.include_router(dashboard_router.router)
+app.include_router(symbols_router.router)
 
 
 @app.get("/api/health")
