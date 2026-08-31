@@ -84,58 +84,39 @@ def delete_grid(grid_id: int, session: Session = Depends(get_session)):
 
 # start/stop delegate to the Lifecycle singleton (Task 21).
 @router.post("/{grid_id}/start")
-def start_grid(grid_id: int, session: Session = Depends(get_session)):
+async def start_grid(grid_id: int, session: Session = Depends(get_session)):
     g = session.get(Grid, grid_id)
     if g is None:
         raise HTTPException(status_code=404)
-    g.status = GridStatus.PENDING  # engine flips to RUNNING when it actually starts
+    try:
+        await lifecycle.start_grid(
+            grid_id=grid_id, symbol=g.symbol,
+            lower=g.lower_price, upper=g.upper_price,
+            count=g.grid_count, mode=g.grid_mode,
+            total_quote_amount=g.total_quote_amount,
+        )
+    except Exception as e:
+        g.status = GridStatus.ERROR
+        g.error_message = f"start_grid failed: {e}"
+        session.commit()
+        raise HTTPException(status_code=500, detail=f"start_grid failed: {e}")
+    g.status = GridStatus.RUNNING  # engine flipped to RUNNING via the grid_running event
     g.started_at = datetime.now(timezone.utc)
-    g.stopped_at = None
     g.error_message = None
     session.commit()
-    # Hand off to the lifecycle; it will fire 'grid_running' once the
-    # strategy has been wired into the engine and on_start has run.
-    import asyncio
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        loop = None
-    if loop is not None and loop.is_running():
-        loop.create_task(
-            lifecycle.start_grid(
-                grid_id=grid_id, symbol=g.symbol,
-                lower=g.lower_price, upper=g.upper_price,
-                count=g.grid_count, mode=g.grid_mode,
-                total_quote_amount=g.total_quote_amount,
-            )
-        )
-    else:
-        asyncio.run(
-            lifecycle.start_grid(
-                grid_id=grid_id, symbol=g.symbol,
-                lower=g.lower_price, upper=g.upper_price,
-                count=g.grid_count, mode=g.grid_mode,
-                total_quote_amount=g.total_quote_amount,
-            )
-        )
     return {"ok": True, "id": grid_id}
 
 
 @router.post("/{grid_id}/stop")
-def stop_grid(grid_id: int, session: Session = Depends(get_session)):
+async def stop_grid(grid_id: int, session: Session = Depends(get_session)):
     g = session.get(Grid, grid_id)
     if g is None:
         raise HTTPException(status_code=404)
+    try:
+        await lifecycle.stop_grid(grid_id=grid_id)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"stop_grid failed: {e}")
     g.status = GridStatus.STOPPED
     g.stopped_at = datetime.now(timezone.utc)
     session.commit()
-    import asyncio
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        loop = None
-    if loop is not None and loop.is_running():
-        loop.create_task(lifecycle.stop_grid(grid_id=grid_id))
-    else:
-        asyncio.run(lifecycle.stop_grid(grid_id=grid_id))
     return {"ok": True, "id": grid_id}
