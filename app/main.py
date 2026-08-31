@@ -17,6 +17,7 @@ from app.api.routers import setup as setup_router
 from app.api.routers import settings as settings_router
 from app.api.routers import trades as trades_router
 from app.db import Base, SessionLocal, engine
+from app.engine.lifecycle import lifecycle
 from app.models.app_state import AppState  # noqa
 from app.models.setting import Setting  # noqa
 from app.models.symbol import Symbol  # noqa
@@ -28,7 +29,9 @@ async def lifespan(app: FastAPI):
     DATA_DIR = Path(__file__).resolve().parent.parent / "data"
     DATA_DIR.mkdir(exist_ok=True)
     Base.metadata.create_all(engine)
+    await lifecycle.start()
     yield
+    await lifecycle.stop()
 
 
 app = FastAPI(lifespan=lifespan, title="Binance Spot Grid Bot")

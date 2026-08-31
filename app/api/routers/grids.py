@@ -5,6 +5,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.db import get_session
+from app.engine.lifecycle import lifecycle
 from app.models.grid import Grid, GridStatus
 
 router = APIRouter(prefix="/api/grids", tags=["grids"])
@@ -81,8 +82,7 @@ def delete_grid(grid_id: int, session: Session = Depends(get_session)):
     return None
 
 
-# start/stop endpoints are placeholders; they will be wired to the engine
-# in Task X (engine wiring).
+# start/stop delegate to the Lifecycle singleton (Task 21).
 @router.post("/{grid_id}/start")
 def start_grid(grid_id: int, session: Session = Depends(get_session)):
     g = session.get(Grid, grid_id)
@@ -93,6 +93,31 @@ def start_grid(grid_id: int, session: Session = Depends(get_session)):
     g.stopped_at = None
     g.error_message = None
     session.commit()
+    # Hand off to the lifecycle; it will fire 'grid_running' once the
+    # strategy has been wired into the engine and on_start has run.
+    import asyncio
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+    if loop is not None and loop.is_running():
+        loop.create_task(
+            lifecycle.start_grid(
+                grid_id=grid_id, symbol=g.symbol,
+                lower=g.lower_price, upper=g.upper_price,
+                count=g.grid_count, mode=g.grid_mode,
+                total_quote_amount=g.total_quote_amount,
+            )
+        )
+    else:
+        asyncio.run(
+            lifecycle.start_grid(
+                grid_id=grid_id, symbol=g.symbol,
+                lower=g.lower_price, upper=g.upper_price,
+                count=g.grid_count, mode=g.grid_mode,
+                total_quote_amount=g.total_quote_amount,
+            )
+        )
     return {"ok": True, "id": grid_id}
 
 
@@ -104,4 +129,13 @@ def stop_grid(grid_id: int, session: Session = Depends(get_session)):
     g.status = GridStatus.STOPPED
     g.stopped_at = datetime.now(timezone.utc)
     session.commit()
+    import asyncio
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+    if loop is not None and loop.is_running():
+        loop.create_task(lifecycle.stop_grid(grid_id=grid_id))
+    else:
+        asyncio.run(lifecycle.stop_grid(grid_id=grid_id))
     return {"ok": True, "id": grid_id}
