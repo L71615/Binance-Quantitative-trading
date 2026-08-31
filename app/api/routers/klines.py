@@ -3,16 +3,10 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from app.db import get_session
+from app.db import get_session, get_setting_value
 from app.models.kline import KLine
-from app.models.setting import Setting
 
 router = APIRouter(prefix="/api/klines", tags=["klines"])
-
-
-def _get_setting(s: Session, key: str, default: str = "") -> str:
-    row = s.get(Setting, key)
-    return row.value if row else default
 
 
 @router.get("")
@@ -29,7 +23,7 @@ def get_klines(symbol: str, interval: str = "1h", limit: int = 200,
         return [_k_to_dict(r) for r in rows]
     # Fall back to live Binance call
     from app.broker.binance import BinanceClient
-    testnet = _get_setting(session, "binance_testnet", "true") == "true"
+    testnet = get_setting_value(session, "binance_testnet", "true") == "true"
     api_key = ""  # public endpoint, no key required for klines
     api_secret = ""
     c = BinanceClient(api_key, api_secret, testnet=testnet)
@@ -54,8 +48,11 @@ def get_klines(symbol: str, interval: str = "1h", limit: int = 200,
 
 
 def _k_to_dict(r: KLine) -> dict:
+    ot = r.open_time
+    if ot is not None and ot.tzinfo is None:
+        ot = ot.replace(tzinfo=timezone.utc)
     return {
-        "open_time": int(r.open_time.timestamp() * 1000),
+        "open_time": int(ot.timestamp() * 1000),
         "open": r.open, "high": r.high, "low": r.low, "close": r.close,
         "volume": r.volume,
     }

@@ -3,18 +3,13 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.crypto_store import save_secret, load_secret, delete_secret
-from app.db import get_session
+from app.db import get_session, get_setting_value
 from app.models.setting import Setting
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
 
 _API_KEY_SLUG = "api_key"
 _API_SECRET_SLUG = "api_secret"
-
-
-def _get_setting(s: Session, key: str, default: str = "") -> str:
-    row = s.get(Setting, key)
-    return row.value if row else default
 
 
 def _set_setting(s: Session, key: str, value: str) -> None:
@@ -33,7 +28,7 @@ class SettingsUpdate(BaseModel):
 
 @router.get("")
 def get_settings(session: Session = Depends(get_session)):
-    testnet = _get_setting(session, "binance_testnet", "true") == "true"
+    testnet = get_setting_value(session, "binance_testnet", "true") == "true"
     has_key = load_secret(_API_KEY_SLUG) is not None
     has_secret = load_secret(_API_SECRET_SLUG) is not None
     return {
@@ -67,7 +62,7 @@ def put_settings(update: SettingsUpdate, session: Session = Depends(get_session)
 def test_binance(session: Session = Depends(get_session)):
     api_key = load_secret(_API_KEY_SLUG) or ""
     api_secret = load_secret(_API_SECRET_SLUG) or ""
-    testnet = _get_setting(session, "binance_testnet", "true") == "true"
+    testnet = get_setting_value(session, "binance_testnet", "true") == "true"
     if not api_key or not api_secret:
         return {"ok": False, "error": "missing credentials"}
     from app.broker.binance import BinanceClient

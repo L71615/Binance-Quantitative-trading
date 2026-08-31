@@ -33,3 +33,9 @@ def get_session() -> Iterator[Session]:
         yield sess
     finally:
         sess.close()
+
+
+def get_setting_value(s: Session, key: str, default: str = "") -> str:
+    from app.models.setting import Setting
+    row = s.get(Setting, key)
+    return row.value if row else default
