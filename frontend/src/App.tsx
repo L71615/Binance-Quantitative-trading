@@ -15,23 +15,12 @@ const TABS: { id: Tab; label: string }[] = [
 function App() {
   const [setupRequired, setSetupRequired] = useState<boolean | null>(null)
   const [tab, setTab] = useState<Tab>('dashboard')
-  const [forbidden, setForbidden] = useState(false)
 
   useEffect(() => {
     fetch('/api/setup/state')
-      .then((r) => {
-        if (r.status === 403) {
-          setForbidden(true)
-          return { setup_required: true }
-        }
-        return r.json()
-      })
+      .then((r) => r.json())
       .then((d) => {
-        if (d && typeof d.setup_required === 'boolean') {
-          setSetupRequired(d.setup_required)
-        } else {
-          setSetupRequired(false)
-        }
+        setSetupRequired(d && typeof d.setup_required === 'boolean' ? d.setup_required : false)
       })
       .catch(() => setSetupRequired(false))
   }, [])
@@ -44,7 +33,7 @@ function App() {
     )
   }
 
-  if (forbidden || setupRequired) {
+  if (setupRequired) {
     return (
       <div className="min-h-screen bg-slate-950 text-slate-100">
         <div className="bg-amber-900/30 border-b border-amber-800 text-amber-200 text-sm px-4 py-2 text-center">

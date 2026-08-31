@@ -34,15 +34,19 @@ export function Settings() {
   const save = async () => {
     setBusy(true)
     setMsg('')
+    // Only send fields the user actually touched. Empty string = "clear".
+    // Without this guard, saving just the testnet toggle would wipe stored
+    // credentials (backend treats "" as delete).
+    const body: Record<string, unknown> = { binance_testnet: testnet }
+    if (apiKey.length > 0) body.binance_api_key = apiKey
+    else if (apiKey === '__clear__') body.binance_api_key = ''
+    if (apiSecret.length > 0) body.binance_api_secret = apiSecret
+    else if (apiSecret === '__clear__') body.binance_api_secret = ''
     try {
       const r = await fetch('/api/settings', {
         method: 'PUT',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          binance_testnet: testnet,
-          binance_api_key: apiKey || '',
-          binance_api_secret: apiSecret || '',
-        }),
+        body: JSON.stringify(body),
       })
       const d = await r.json()
       if (d.ok) {

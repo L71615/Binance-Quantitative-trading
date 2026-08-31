@@ -37,7 +37,10 @@ export function Dashboard() {
     let cancelled = false
     const load = () => {
       fetch('/api/dashboard/overview')
-        .then((r) => r.json())
+        .then((r) => {
+          if (!r.ok) throw new Error(`HTTP ${r.status}`)
+          return r.json()
+        })
         .then((d: Overview) => {
           if (!cancelled) setOverview(d)
         })
@@ -45,7 +48,10 @@ export function Dashboard() {
           if (!cancelled) setErr('overview 加载失败: ' + String(e))
         })
       fetch('/api/dashboard/balances')
-        .then((r) => r.json())
+        .then((r) => {
+          if (!r.ok) throw new Error(`HTTP ${r.status}`)
+          return r.json()
+        })
         .then((d: Balance[]) => {
           if (!cancelled) setBalances(d ?? [])
         })
