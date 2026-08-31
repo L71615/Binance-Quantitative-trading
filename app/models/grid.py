@@ -1,7 +1,7 @@
 import enum
 from datetime import datetime
 
-from sqlalchemy import DateTime, Enum, Float, Integer, String
+from sqlalchemy import DateTime, Enum, Float, ForeignKey, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
@@ -18,7 +18,7 @@ class Grid(Base):
     __tablename__ = "grids"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    symbol: Mapped[str] = mapped_column(String, nullable=False)
+    symbol: Mapped[str] = mapped_column(String, ForeignKey("symbols.symbol"), nullable=False)
     lower_price: Mapped[float] = mapped_column(Float, nullable=False)
     upper_price: Mapped[float] = mapped_column(Float, nullable=False)
     grid_count: Mapped[int] = mapped_column(Integer, nullable=False)

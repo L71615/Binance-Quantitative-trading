@@ -1,8 +1,8 @@
 from datetime import datetime, timezone
 
 from app.db import Base, engine, SessionLocal
-from app.models.grid import Grid, GridStatus
-from app.models.order import Order
+from app.models import Grid, Order
+from app.models.grid import GridStatus
 
 
 def test_grid_create_and_status():
