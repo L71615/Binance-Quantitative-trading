@@ -2,8 +2,11 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections import deque
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 class ConnectionManager:
@@ -12,9 +15,9 @@ class ConnectionManager:
         self._lock = asyncio.Lock()
 
     async def connect(self, ws) -> None:
-        await ws.accept()
         async with self._lock:
             self._clients.add(ws)
+        await ws.accept()
 
     async def disconnect(self, ws) -> None:
         async with self._lock:
@@ -28,6 +31,7 @@ class ConnectionManager:
             try:
                 await ws.send_json(message)
             except Exception:
+                logger.warning("ws send failed, pruning client", exc_info=True)
                 dead.append(ws)
         if dead:
             async with self._lock:
