@@ -13,6 +13,7 @@ from app.api.routers import setup as setup_router
 from app.db import Base, SessionLocal, engine
 from app.models.app_state import AppState  # noqa
 from app.models.setting import Setting  # noqa
+from app.models.symbol import Symbol  # noqa
 
 
 @asynccontextmanager

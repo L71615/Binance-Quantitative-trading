@@ -20,3 +20,5 @@ def test_roundtrip():
         assert row is not None
         assert row.base == "BTC"
         assert row.min_qty == 0.00001
+        assert row.updated_at == now
+        assert row.updated_at.tzinfo is not None
