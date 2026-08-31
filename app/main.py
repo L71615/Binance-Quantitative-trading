@@ -59,6 +59,10 @@ async def setup_gate(request: Request, call_next):
     path = request.url.path
     if not path.startswith("/api/") or any(path.startswith(p) for p in OPEN_PREFIXES):
         return await call_next(request)
+    # /api/settings GET is allowed during setup (so the wizard can show current state)
+    # but PUT is still gated — can't overwrite secrets before setup completes.
+    if path == "/api/settings" and request.method == "GET":
+        return await call_next(request)
     # Check setup state
     from app.api.routers.setup import is_setup_completed  # avoid circular
     with SessionLocal() as s:
