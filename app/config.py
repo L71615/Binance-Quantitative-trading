@@ -11,10 +11,17 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_prefix="BINANCE_", extra="ignore")
 
+    # --- Binance (legacy top-level prefix) ---
     testnet: bool = Field(default=True, alias="BINANCE_TESTNET")
     api_key: str = Field(default="", alias="BINANCE_API_KEY")
     api_secret: str = Field(default="", alias="BINANCE_API_SECRET")
     base_url: str = Field(default="https://testnet.binance.vision", alias="BINANCE_BASE_URL_OVERRIDE")
+
+    # --- LLM (OpenAI-compatible: DeepSeek, OpenAI, Moonshot, ...) ---
+    # Explicit aliases so the BINANCE_ prefix above doesn't apply.
+    llm_base_url: str = Field(default="", alias="LLM_BASE_URL")
+    llm_api_key: str = Field(default="", alias="LLM_API_KEY")
+    llm_model: str = Field(default="deepseek-chat", alias="LLM_MODEL")
 
     @property
     def binance_testnet(self) -> bool:

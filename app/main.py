@@ -9,6 +9,7 @@ from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from app.api.routers import ai as ai_router
 from app.api.routers import dashboard as dashboard_router
 from app.api.routers import grids as grids_router
 from app.api.routers import klines as klines_router
@@ -51,6 +52,7 @@ OPEN_PREFIXES = (
     "/api/docs",
     "/api/openapi.json",
     "/api/redoc",
+    "/api/ai/config",
 )
 
 
@@ -79,6 +81,7 @@ app.include_router(orders_router.router)
 app.include_router(trades_router.router)
 app.include_router(dashboard_router.router)
 app.include_router(symbols_router.router)
+app.include_router(ai_router.router)
 
 
 @app.get("/api/health")
