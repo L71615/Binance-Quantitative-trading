@@ -10,6 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.api.routers import setup as setup_router
+from app.api.routers import settings as settings_router
 from app.db import Base, SessionLocal, engine
 from app.models.app_state import AppState  # noqa
 from app.models.setting import Setting  # noqa
@@ -57,6 +58,7 @@ async def setup_gate(request: Request, call_next):
 
 
 app.include_router(setup_router.router)
+app.include_router(settings_router.router)
 
 
 @app.get("/api/health")
