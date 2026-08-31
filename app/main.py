@@ -5,7 +5,7 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
@@ -20,6 +20,7 @@ from app.db import Base, SessionLocal, engine
 from app.models.app_state import AppState  # noqa
 from app.models.setting import Setting  # noqa
 from app.models.symbol import Symbol  # noqa
+from app.ws.realtime import manager
 
 
 @asynccontextmanager
@@ -74,3 +75,13 @@ app.include_router(dashboard_router.router)
 @app.get("/api/health")
 def health():
     return {"status": "ok"}
+
+
+@app.websocket("/ws/realtime")
+async def ws_endpoint(websocket: WebSocket):
+    await manager.connect(websocket)
+    try:
+        while True:
+            await websocket.receive_text()  # keep alive, ignore
+    except WebSocketDisconnect:
+        await manager.disconnect(websocket)
