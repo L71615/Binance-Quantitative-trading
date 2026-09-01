@@ -156,3 +156,46 @@ async def test_tick_marks_error_on_llm_exception(_fresh_state):
     assert len(rows) == 1
     assert rows[0].outcome == "error"
     assert "upstream down" in (rows[0].error or "")
+
+
+class OrderCapturingBroker(FakeBroker):
+    def __init__(self):
+        super().__init__()
+        self.placed = []
+
+    def place_order(self, symbol, side, type_, quantity, price=None, **kw):
+        self.placed.append(
+            {"symbol": symbol, "side": side, "type_": type_, "quantity": quantity,
+             "price": price}
+        )
+        return {"orderId": 999, "status": "FILLED", "executedQty": str(quantity),
+                "price": str(price)}
+
+
+@pytest.mark.asyncio
+async def test_tick_places_buy_order_when_guards_pass(_fresh_state):
+    from app.services.ai_trader.service import AITraderService
+    broker = OrderCapturingBroker()
+    llm = FakeLLM([json.dumps(
+        {"action": "buy", "symbol": "BTCUSDT", "qty": 0.001, "price": 30000,
+         "reason": "small test buy under per-order cap"})])
+    s = AITraderService(llm=llm, broker=broker)
+    s._set_status("running")
+    # Set per-order cap high enough that 30 USDT passes
+    with SessionLocal() as db:
+        from app.models.ai_settings import load_or_create
+        row = load_or_create(db)
+        row.max_order_quote_usdt = 100.0
+        db.commit()
+    await s.tick()
+    assert len(broker.placed) == 1
+    placed = broker.placed[0]
+    assert placed["symbol"] == "BTCUSDT"
+    assert placed["side"] == "buy"
+    assert placed["quantity"] == 0.001
+    assert placed["price"] == 30000
+    # Decision row outcome=placed
+    with SessionLocal() as db:
+        rows = db.query(AIDecision).all()
+    assert rows[0].outcome == "placed"
+    assert rows[0].order_id == "999"

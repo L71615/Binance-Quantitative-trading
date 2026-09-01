@@ -263,7 +263,46 @@ class AITraderService:
             )
             return
 
-        # 4) Place order (stub in this task — Task 9 wires the real call)
+        # 4) Place order
+        if parsed["action"] == "hold":
+            self._write_decision(
+                symbol=symbol,
+                market_snapshot=market_json,
+                prompt=prompt_text,
+                raw_response=raw[:4000],
+                parsed=json.dumps(parsed),
+                action="hold",
+                guard_results=json.dumps(
+                    [{"ok": r.ok, "reason": r.reason} for r in results]
+                ),
+                outcome="no_trade",
+            )
+            return
+
+        try:
+            order = self.broker.place_order(
+                symbol=symbol,
+                side=parsed["action"],
+                type_="limit",
+                quantity=parsed["qty"],
+                price=parsed["price"],
+            )
+        except Exception as e:
+            self._write_decision(
+                symbol=symbol,
+                market_snapshot=market_json,
+                prompt=prompt_text,
+                raw_response=raw[:4000],
+                parsed=json.dumps(parsed),
+                action=parsed["action"],
+                guard_results=json.dumps(
+                    [{"ok": r.ok, "reason": r.reason} for r in results]
+                ),
+                outcome="error",
+                error=f"place_failed:{type(e).__name__}:{e}",
+            )
+            return
+
         self._write_decision(
             symbol=symbol,
             market_snapshot=market_json,
@@ -274,8 +313,11 @@ class AITraderService:
             guard_results=json.dumps(
                 [{"ok": r.ok, "reason": r.reason} for r in results]
             ),
-            outcome="no_trade",  # Task 9 sets this to "placed" after a successful place
-            error="order_placement_stub",
+            outcome="placed",
+            order_id=str(order.get("orderId")),
+            order_status=order.get("status"),
+            filled_qty=float(order.get("executedQty") or 0) or None,
+            filled_price=float(order.get("price") or 0) or None,
         )
 
     def _write_decision(self, **kw) -> None:
