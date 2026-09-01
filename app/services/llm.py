@@ -43,6 +43,7 @@ class LLMClient:
         *,
         temperature: float = 0.3,
         max_tokens: int = 1024,
+        response_format: dict[str, Any] | None = None,
     ) -> str:
         if not self.is_configured():
             raise LLMError(
@@ -56,6 +57,8 @@ class LLMClient:
             "max_tokens": max_tokens,
             "stream": False,
         }
+        if response_format is not None:
+            payload["response_format"] = response_format
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "content-type": "application/json",
