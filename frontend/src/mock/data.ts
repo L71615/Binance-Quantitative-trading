@@ -67,6 +67,19 @@ export type GridLevel = {
   filled: boolean
 }
 
+export type Trade = {
+  id: string
+  time: string
+  gridId: number
+  symbol: string
+  side: OrderSide
+  price: number
+  qty: number
+  fee: number
+  feeAsset: string
+  realizedPnl: number
+}
+
 export type SettingsShape = {
   apiKey: string
   apiSecret: string
@@ -252,6 +265,34 @@ export const btcLevels: GridLevel[] = Array.from({ length: 10 }, (_, i) => {
     filled: i < 4,
   }
 })
+
+// Derived from `orders` for the Trades page — one trade per filled order.
+// `filled === qty` is treated as a single trade; partially-filled orders still
+// show as one trade line with the actually-filled qty to keep the row count stable.
+export const trades: Trade[] = orders
+  .filter((o) => o.filled > 0)
+  .map((o, i) => {
+    const realizedPnl =
+      o.side === 'sell' ? Number((o.filled * 1.5).toFixed(2)) : 0
+    return {
+      id: 'T' + (200000 + i),
+      time: o.time,
+      gridId: o.gridId,
+      symbol: o.symbol,
+      side: o.side,
+      price: o.price,
+      qty: o.filled,
+      fee: Number((o.filled * 0.001).toFixed(6)),
+      feeAsset: o.symbol.endsWith('USDT')
+        ? 'USDT'
+        : o.symbol.endsWith('BTC')
+        ? 'BTC'
+        : o.symbol.endsWith('BNB')
+        ? 'BNB'
+        : 'USDT',
+      realizedPnl,
+    }
+  })
 
 export const symbolOptions = ['BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'SOLUSDT']
 export const intervalOptions = ['1m', '5m', '15m', '1h', '1d']

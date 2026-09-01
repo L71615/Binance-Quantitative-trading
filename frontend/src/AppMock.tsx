@@ -4,6 +4,7 @@ import { Dashboard } from './mock/pages/Dashboard'
 import { Charts } from './mock/pages/Charts'
 import { Grids } from './mock/pages/Grids'
 import { Orders } from './mock/pages/Orders'
+import { Trades } from './mock/pages/Trades'
 import { Logs } from './mock/pages/Logs'
 import { Settings } from './mock/pages/Settings'
 
@@ -20,6 +21,7 @@ function AppMock() {
       {page === 'charts' && <Charts />}
       {page === 'grids' && <Grids />}
       {page === 'orders' && <Orders />}
+      {page === 'trades' && <Trades />}
       {page === 'logs' && <Logs />}
       {page === 'settings' && <Settings />}
     </Layout>

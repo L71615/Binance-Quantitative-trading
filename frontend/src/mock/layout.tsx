@@ -5,6 +5,7 @@ export type PageId =
   | 'charts'
   | 'grids'
   | 'orders'
+  | 'trades'
   | 'logs'
   | 'settings'
 
@@ -13,6 +14,7 @@ export const NAV: { id: PageId; label: string; sub: string }[] = [
   { id: 'charts', label: 'Charts', sub: 'K线 / 网格' },
   { id: 'grids', label: 'Grids', sub: '网格策略' },
   { id: 'orders', label: 'Orders', sub: '订单' },
+  { id: 'trades', label: 'Trades', sub: '成交' },
   { id: 'logs', label: 'Logs', sub: '日志' },
   { id: 'settings', label: 'Settings', sub: '设置' },
 ]
@@ -22,6 +24,7 @@ const PAGE_TITLE: Record<PageId, string> = {
   charts: 'Charts',
   grids: 'Grids',
   orders: 'Orders',
+  trades: 'Trades',
   logs: 'Logs',
   settings: 'Settings',
 }
