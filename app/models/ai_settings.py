@@ -29,6 +29,9 @@ class AISettings(Base):
     symbols: Mapped[str] = mapped_column(String, default='["BTCUSDT"]', nullable=False)
     poll_interval_sec: Mapped[int] = mapped_column(Integer, default=60, nullable=False)
     llm_model: Mapped[str | None] = mapped_column(String, nullable=True)
+    consecutive_llm_errors: Mapped[int] = mapped_column(
+        Integer, default=0, nullable=False
+    )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, default=lambda: datetime.now(UTC), nullable=False
     )

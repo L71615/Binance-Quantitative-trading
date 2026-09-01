@@ -1,3 +1,6 @@
+import json
+from datetime import datetime, UTC
+
 import pytest
 
 from app.db import Base, SessionLocal, engine
@@ -50,10 +53,8 @@ def test_tick_placeholder_updates_last_tick_at():
 
 
 # -- Task 8: full tick loop (context -> prompt -> llm -> parser -> guards -> audit) -----
-import json
 
-from app.db import SessionLocal
-from app.models.ai_decision import AIDecision
+from app.models.ai_decision import AIDecision  # noqa: E402
 
 
 @pytest.fixture
@@ -199,3 +200,101 @@ async def test_tick_places_buy_order_when_guards_pass(_fresh_state):
         rows = db.query(AIDecision).all()
     assert rows[0].outcome == "placed"
     assert rows[0].order_id == "999"
+
+
+# -- Task 10: tripwires (daily_loss / daily_trades / 5x LLM errors) -------------------
+
+
+@pytest.mark.asyncio
+async def test_daily_loss_cap_trips_to_paused(_fresh_state):
+    """When a tick's pnl_today < daily_loss_cap_usdt, the daily_loss_cap guard
+    fires, the tripwire sets status=paused with reason 'daily_loss_cap_hit'."""
+    from app.services.ai_trader.service import AITraderService
+    from app.models.ai_settings import load_or_create
+
+    broker = OrderCapturingBroker()
+    llm = FakeLLM([
+        json.dumps({"action": "buy", "symbol": "BTCUSDT", "qty": 0.001,
+                    "price": 30000, "reason": "small accumulating buy"}),
+    ])
+    s = AITraderService(llm=llm, broker=broker)
+    s._set_status("running")
+    # Construct state where the daily_loss guard genuinely fires:
+    # pre-seed today's pnl so it is well below the cap, and disable the
+    # per-order cap so the LLM buy actually reaches the daily_loss guard.
+    with SessionLocal() as db:
+        row = load_or_create(db)
+        row.max_order_quote_usdt = 1000.0
+        row.daily_loss_cap_usdt = -0.01
+        # placed-sell with negative price → revenue = (-1.0)(1.0) = -1.0,
+        # so today's pnl = -1.0, which is < -0.01 → guard fires.
+        db.add(AIDecision(
+            ts=datetime.now(UTC), symbol="BTCUSDT",
+            market_snapshot="{}", prompt="seed", raw_response="seed",
+            parsed=None, action="sell", guard_results="[]",
+            outcome="placed", filled_qty=1.0, filled_price=-1.0,
+        ))
+        db.commit()
+    await s.tick()
+    st = s.status()
+    assert st["status"] == "paused", (
+        f"expected paused after daily-loss tripwire; got {st!r}"
+    )
+    assert (st["status_reason"] or "") == "daily_loss_cap_hit"
+
+
+@pytest.mark.asyncio
+async def test_daily_trades_cap_trips_to_paused(_fresh_state):
+    """When trades_today >= daily_max_trades, the daily_trades_cap guard
+    fires and the tripwire sets status=paused with 'daily_trades_cap_hit'."""
+    from app.services.ai_trader.service import AITraderService
+    from app.models.ai_settings import load_or_create
+
+    broker = OrderCapturingBroker()
+    llm = FakeLLM([
+        json.dumps({"action": "hold", "symbol": "BTCUSDT", "qty": 0,
+                    "price": 0, "reason": "hold but guard will still fire"}),
+    ])
+    s = AITraderService(llm=llm, broker=broker)
+    s._set_status("running")
+    with SessionLocal() as db:
+        row = load_or_create(db)
+        row.daily_max_trades = 3
+        # Loss cap far below any realistic loss so daily_loss_cap guard
+        # does not fire before daily_trades_cap (short-circuits).
+        row.daily_loss_cap_usdt = -1_000_000.0
+        # Pre-seed 3 placed rows today so trades_today (3) >= daily_max_trades (3).
+        # filled_price=0 keeps today's pnl at 0, so daily_loss guard stays green.
+        for _ in range(3):
+            db.add(AIDecision(
+                ts=datetime.now(UTC), symbol="BTCUSDT",
+                market_snapshot="{}", prompt="seed", raw_response="seed",
+                parsed=None, action="buy", guard_results="[]",
+                outcome="placed",
+                filled_qty=0.0, filled_price=0.0,
+            ))
+        db.commit()
+    await s.tick()
+    st = s.status()
+    assert st["status"] == "paused", (
+        f"expected paused after daily-trades tripwire; got {st!r}"
+    )
+    assert (st["status_reason"] or "") == "daily_trades_cap_hit"
+
+
+@pytest.mark.asyncio
+async def test_five_consecutive_llm_errors_trip_to_error(_fresh_state):
+    """5 consecutive LLM exceptions trip the service to status=error."""
+    from app.services.ai_trader.service import AITraderService
+
+    class AlwaysBoom:
+        async def chat(self, *a, **k):
+            raise RuntimeError("upstream down")
+
+    s = AITraderService(llm=AlwaysBoom(), broker=FakeBroker())
+    s._set_status("running")
+    for _ in range(5):
+        await s.tick()
+    st = s.status()
+    assert st["status"] == "error"
+    assert "consecutive_llm_errors" in (st["status_reason"] or "")
