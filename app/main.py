@@ -6,6 +6,7 @@ import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+import pydantic
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -40,12 +41,28 @@ async def lifespan(app: FastAPI):
     # are present. Missing credentials are fine — the service still boots
     # and the read endpoints keep responding.
     #
-    # BinanceClient.__init__ does NOT raise on missing/invalid credentials
-    # — it stores the strings as-is. The first network call is what would
-    # later fail (auth/sig error). So the only realistic exceptions here
-    # are from pydantic settings construction (`get_settings()`) and from
-    # httpx.Client() construction with the testnet/prod URL. We narrow the
-    # `except` to those and log a traceback so an operator notices.
+    # Component analysis (verified by reading the code):
+    #   - get_settings() in app/config.py: constructs a pydantic-settings
+    #     `Settings()`. With `extra="ignore"` and `Field(default=...)` on
+    #     every field, it normally doesn't fail, but CAN raise
+    #     pydantic.ValidationError if an env value doesn't coerce to the
+    #     declared type (e.g. BINANCE_TESTNET="garbage").
+    #   - load_secret() in app/crypto_store.py: catches
+    #     `keyring.errors.KeyringError` internally and returns None — it
+    #     cannot raise at runtime. (Module-import errors are `ImportError`
+    #     at app import time, not in this block.)
+    #   - BinanceClient.__init__ in app/broker/binance.py: stores
+    #     api_key/api_secret as-is with no validation, picks base URL
+    #     from two hardcoded constants by a bool, and constructs
+    #     `httpx.Client(base_url=<constant>, timeout=10.0)`. With those
+    #     inputs it cannot raise — auth failures are deferred to the
+    #     first network call, not the constructor.
+    #
+    # Therefore the only LEGITIMATE, recoverable exception here is a
+    # malformed pydantic settings payload. We narrow `except` to that
+    # tuple. Any other exception (AttributeError after a rename, NameError,
+    # TypeError, KeyError, etc.) is a programmer error and must propagate
+    # so a typo doesn't silently disable live trading.
     try:
         from app.broker.binance import BinanceClient
         from app.config import get_settings
@@ -55,16 +72,16 @@ async def lifespan(app: FastAPI):
         api_key = load_secret("api_key") or ""
         api_secret = load_secret("api_secret") or ""
         if api_key and api_secret:
-            ai_trader.broker = BinanceClient(
-                api_key, api_secret, testnet=cfg.binance_testnet
+            ai_trader.set_broker(
+                BinanceClient(api_key, api_secret, testnet=cfg.binance_testnet)
             )
-            ai_trader.wiring_ok = True
         else:
             # No creds — cold start. Service is bootable but not wired.
-            ai_trader.wiring_ok = False
-    except Exception:
-        # Cold start must still succeed with no credentials at all.
-        # Surface the failure via logger + via /status (`wiring_ok=False`).
+            # set_broker(None) keeps the wiring_ok flag invariant intact.
+            ai_trader.set_broker(None)
+    except (pydantic.ValidationError,):
+        # Malformed env / config — recoverable, surface via logger +
+        # via /status (wiring_ok=False).
         logger.exception("AI Trader broker wiring failed during lifespan")
         try:
             from app.services.ai_trader.service import trader as _ai_trader

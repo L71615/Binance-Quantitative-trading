@@ -5,7 +5,6 @@ Control endpoints (start/pause/resume/...) live in Task 12.
 """
 from __future__ import annotations
 
-import json
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query

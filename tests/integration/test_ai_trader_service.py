@@ -298,3 +298,63 @@ async def test_five_consecutive_llm_errors_trip_to_error(_fresh_state):
     st = s.status()
     assert st["status"] == "error"
     assert "consecutive_llm_errors" in (st["status_reason"] or "")
+
+
+# -- Task 11 fix pass 2: wiring setters preserve flag invariant ---------
+
+
+def test_wiring_setters_keep_flags_consistent():
+    """set_broker / set_llm must atomically maintain the wiring_ok flag
+    invariant:
+        wiring_ok == broker_wired and llm_wired
+    so a future code path (Task 12 control endpoints, PUT /settings, ...)
+    can rewire the singleton without leaving /status under- or over-reporting.
+    """
+    from app.services.ai_trader.service import AITraderService
+
+    # Start cold: no broker, no LLM.
+    s = AITraderService()
+    assert s.wiring_ok is False
+    assert s.status()["wiring_ok"] is False
+    assert s.status()["broker_wired"] is False
+    assert s.status()["llm_wired"] is False
+
+    # Wire only the broker — still not fully wired (no LLM).
+    s.set_broker(FakeBroker())
+    st = s.status()
+    assert st["broker_wired"] is True
+    assert st["llm_wired"] is False
+    assert st["wiring_ok"] is False, (
+        "wiring_ok must stay False until both broker and llm are present"
+    )
+
+    # Now wire the LLM — fully wired.
+    s.set_llm(FakeLLM([]))
+    st = s.status()
+    assert st["broker_wired"] is True
+    assert st["llm_wired"] is True
+    assert st["wiring_ok"] is True
+
+    # Unwire the broker — back to not-fully-wired. wiring_ok flips False.
+    s.set_broker(None)
+    st = s.status()
+    assert st["broker_wired"] is False
+    assert st["llm_wired"] is True
+    assert st["wiring_ok"] is False, (
+        "wiring_ok must flip False the moment one side is unwired"
+    )
+
+    # Re-wire broker — fully wired again. Flags must remain consistent.
+    s.set_broker(FakeBroker())
+    st = s.status()
+    assert st["broker_wired"] is True
+    assert st["llm_wired"] is True
+    assert st["wiring_ok"] is True
+
+    # And the symmetric path: setting LLM first, then broker, must also
+    # leave wiring_ok=True only at the end.
+    s2 = AITraderService()
+    s2.set_llm(FakeLLM([]))
+    assert s2.status()["wiring_ok"] is False
+    s2.set_broker(FakeBroker())
+    assert s2.status()["wiring_ok"] is True
