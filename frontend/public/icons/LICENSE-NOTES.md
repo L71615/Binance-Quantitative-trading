@@ -1,0 +1,1 @@
+Icons from spothq/cryptocurrency-icons, CC0

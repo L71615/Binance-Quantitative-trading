@@ -167,3 +167,58 @@ export function inputCls(extra = '') {
     extra
   )
 }
+
+// Strip common quote-asset suffixes to get the base ticker.
+// e.g. BTCUSDT -> BTC, ETHBTC -> ETH, BNBBUSD -> BNB
+const QUOTE_SUFFIXES = ['USDT', 'BUSD', 'USDC', 'BTC', 'ETH', 'BNB', 'USD']
+
+function baseSymbol(symbol: string): string {
+  const upper = symbol.toUpperCase()
+  for (const suf of QUOTE_SUFFIXES) {
+    if (upper.endsWith(suf) && upper.length > suf.length) {
+      return upper.slice(0, upper.length - suf.length)
+    }
+  }
+  return upper
+}
+
+// Symbol -> icon path map (CC0 icons shipped under /public/icons/).
+// If a symbol's base isn't in this map we fall back to a letter circle.
+const ICON_BASES = new Set(['BTC', 'ETH', 'BNB', 'USDT', 'SOL', 'DOGE'])
+
+export function CryptoIcon({
+  symbol,
+  size = 24,
+  className = '',
+}: {
+  symbol: string
+  size?: number
+  className?: string
+}) {
+  const base = baseSymbol(symbol)
+  if (ICON_BASES.has(base)) {
+    return (
+      <img
+        src={`/icons/${base.toLowerCase()}.svg`}
+        width={size}
+        height={size}
+        alt={symbol}
+        className={'inline-block rounded-full ' + className}
+      />
+    )
+  }
+  // Fallback: a slate-700 circle with the first letter.
+  const letter = (base[0] ?? '?').toUpperCase()
+  return (
+    <span
+      className={
+        'inline-flex items-center justify-center rounded-full bg-slate-700 text-slate-300 font-mono ' +
+        className
+      }
+      style={{ width: size, height: size, fontSize: Math.max(10, Math.floor(size * 0.5)) }}
+      aria-label={symbol}
+    >
+      {letter}
+    </span>
+  )
+}
