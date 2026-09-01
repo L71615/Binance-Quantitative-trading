@@ -4,6 +4,8 @@ Any module that touches the schema (tests, FastAPI startup, the engine)
 should `from app.models import Grid  # noqa` (or similar) so all sibling
 tables are registered before `Base.metadata.create_all()` is invoked.
 """
+from app.models.ai_decision import AIDecision  # noqa: F401
+from app.models.ai_settings import AISettings  # noqa: F401
 from app.models.app_state import AppState  # noqa: F401
 from app.models.grid import Grid  # noqa: F401
 from app.models.kline import KLine  # noqa: F401
