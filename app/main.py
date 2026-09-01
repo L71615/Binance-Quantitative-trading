@@ -10,6 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.api.routers import ai as ai_router
+from app.api.routers import ai_trader as ai_trader_router
 from app.api.routers import dashboard as dashboard_router
 from app.api.routers import grids as grids_router
 from app.api.routers import klines as klines_router
@@ -32,6 +33,24 @@ async def lifespan(app: FastAPI):
     DATA_DIR.mkdir(exist_ok=True)
     Base.metadata.create_all(engine)
     await lifecycle.start()
+    # Wire the AI Trader singleton with a live BinanceClient if credentials
+    # are present. Missing credentials are fine — the service still boots
+    # and the read endpoints keep responding.
+    try:
+        from app.broker.binance import BinanceClient
+        from app.config import get_settings
+        from app.crypto_store import load_secret
+        from app.services.ai_trader.service import trader as ai_trader
+        cfg = get_settings()
+        api_key = load_secret("api_key") or ""
+        api_secret = load_secret("api_secret") or ""
+        if api_key and api_secret:
+            ai_trader.broker = BinanceClient(
+                api_key, api_secret, testnet=cfg.binance_testnet
+            )
+    except Exception:
+        # Never let wiring failures prevent the app from booting.
+        pass
     yield
     await lifecycle.stop()
 
@@ -53,6 +72,7 @@ OPEN_PREFIXES = (
     "/api/openapi.json",
     "/api/redoc",
     "/api/ai/config",
+    "/api/ai-trader",
 )
 
 
@@ -82,6 +102,7 @@ app.include_router(trades_router.router)
 app.include_router(dashboard_router.router)
 app.include_router(symbols_router.router)
 app.include_router(ai_router.router)
+app.include_router(ai_trader_router.router)
 
 
 @app.get("/api/health")

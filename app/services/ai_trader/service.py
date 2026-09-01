@@ -392,3 +392,10 @@ class AITraderService:
                 row.status_reason = reason
             row.updated_at = datetime.now(UTC)
             s.commit()
+
+
+# Singleton used by the FastAPI router and by the lifespan loop.
+# Default wiring: no LLM, no broker. main.py replaces these during startup
+# if credentials are present. Importing this module must never fail just
+# because the keyring is empty.
+trader = AITraderService()
