@@ -72,7 +72,6 @@ def test_dry_run_returns_parsed_json(client, monkeypatch):
                                "qty": 0, "price": 0,
                                "reason": "dry-run return value"})
 
-    from app.broker import binance as bn
     monkeypatch.setattr(svc.trader, "llm", StubLLM())
     monkeypatch.setattr(svc.trader, "broker",
         type("B", (), {
@@ -85,11 +84,15 @@ def test_dry_run_returns_parsed_json(client, monkeypatch):
     assert r.status_code == 200
     data = r.json()
     assert data["parsed"]["action"] == "hold"
+    # Dry-run must return a real guard_verdict now (Finding 2): a list of
+    # {ok, reason} entries produced by guards.run_all, NOT None.
+    assert isinstance(data["guard_verdict"], list)
+    assert len(data["guard_verdict"]) >= 1
+    assert all("ok" in r and "reason" in r for r in data["guard_verdict"])
     # No decision row written by this dry-run call: count only rows
     # added after the call so prior tests' seed data don't fail us.
     with SessionLocal() as s:
         from app.models.ai_decision import AIDecision
-        from app.models.ai_settings import load_or_create
         baseline = s.query(AIDecision).filter(AIDecision.symbol == "BTCUSDT").count()
     # Re-run dry-run and ensure no NEW rows appear for BTCUSDT.
     r2 = client.get("/api/ai-trader/dry-run?symbol=BTCUSDT")
@@ -156,3 +159,36 @@ def test_dry_run_503_when_trader_not_wired(client, monkeypatch):
     r = client.get("/api/ai-trader/dry-run?symbol=BTCUSDT")
     assert r.status_code == 503
     assert r.json()["detail"] == "trader_not_wired"
+
+
+def test_ai_trader_open_through_setup_gate_when_setup_incomplete(client):
+    """Spec §7 deliberately puts /api/ai-trader/* outside the first-run
+    setup gate so the setup wizard can read AI Trader status.
+
+    Regression-protect this: delete the AppState('setup_completed') row
+    (so setup is incomplete), then drive a request through the full
+    middleware stack and assert the AI Trader read endpoint is still
+    reachable — NOT 403 from the gate.
+    """
+    from app.models.app_state import AppState
+    # Ensure setup is incomplete by deleting the row if it exists.
+    with SessionLocal() as s:
+        row = s.get(AppState, "setup_completed")
+        if row is not None:
+            s.delete(row)
+            s.commit()
+    # Confirm setup gate is actually armed: a gated endpoint returns 403.
+    gated = client.get("/api/dashboard/overview")
+    assert gated.status_code == 403, (
+        "precondition: setup gate must be armed when no AppState row exists"
+    )
+    # AI Trader read endpoint must be open — must NOT be 403.
+    r = client.get("/api/ai-trader/status")
+    assert r.status_code == 200, (
+        f"AI Trader status blocked by setup gate (got {r.status_code}); "
+        "OPEN_PREFIXES in app/main.py must include '/api/ai-trader'"
+    )
+    assert r.json().get("status") == "idle"
+    # And decisions list (no setup state needed) is also reachable.
+    r2 = client.get("/api/ai-trader/decisions")
+    assert r2.status_code == 200

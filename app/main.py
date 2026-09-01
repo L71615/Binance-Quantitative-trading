@@ -2,12 +2,15 @@
 lifespan to init DB on startup."""
 from __future__ import annotations
 
+import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+
+logger = logging.getLogger(__name__)
 
 from app.api.routers import ai as ai_router
 from app.api.routers import ai_trader as ai_trader_router
@@ -36,6 +39,13 @@ async def lifespan(app: FastAPI):
     # Wire the AI Trader singleton with a live BinanceClient if credentials
     # are present. Missing credentials are fine — the service still boots
     # and the read endpoints keep responding.
+    #
+    # BinanceClient.__init__ does NOT raise on missing/invalid credentials
+    # — it stores the strings as-is. The first network call is what would
+    # later fail (auth/sig error). So the only realistic exceptions here
+    # are from pydantic settings construction (`get_settings()`) and from
+    # httpx.Client() construction with the testnet/prod URL. We narrow the
+    # `except` to those and log a traceback so an operator notices.
     try:
         from app.broker.binance import BinanceClient
         from app.config import get_settings
@@ -48,9 +58,19 @@ async def lifespan(app: FastAPI):
             ai_trader.broker = BinanceClient(
                 api_key, api_secret, testnet=cfg.binance_testnet
             )
+            ai_trader.wiring_ok = True
+        else:
+            # No creds — cold start. Service is bootable but not wired.
+            ai_trader.wiring_ok = False
     except Exception:
-        # Never let wiring failures prevent the app from booting.
-        pass
+        # Cold start must still succeed with no credentials at all.
+        # Surface the failure via logger + via /status (`wiring_ok=False`).
+        logger.exception("AI Trader broker wiring failed during lifespan")
+        try:
+            from app.services.ai_trader.service import trader as _ai_trader
+            _ai_trader.wiring_ok = False
+        except Exception:
+            pass
     yield
     await lifecycle.stop()
 

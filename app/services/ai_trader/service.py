@@ -36,6 +36,10 @@ class AITraderService:
         self.broker = broker
         self._session_factory = db_session_factory or SessionLocal
         self.grid_has_open_orders = grid_has_open_orders or (lambda s: False)
+        # Observability for the read-only /status surface. main.py flips this
+        # True when the broker is wired successfully during lifespan. A failed
+        # or absent wiring must surface in /status — never silently idle.
+        self.wiring_ok: bool = broker is not None
 
     # ---- status helpers -----------------------------------------------
     def _settings(self) -> AISettings:
@@ -50,24 +54,68 @@ class AITraderService:
             row.updated_at = datetime.now(UTC)
             s.commit()
 
+    def _compute_today_counters(self) -> tuple[float, int]:
+        """Compute today's realised pnl and placed-trade count.
+
+        Single source of truth: both `_tick_symbol` and `status()` call this.
+        """
+        from app.models.ai_decision import AIDecision
+        with self._session_factory() as s:
+            today_start = datetime.now(UTC).replace(
+                hour=0, minute=0, second=0, microsecond=0
+            )
+            today_rows = (
+                s.query(AIDecision)
+                .filter(AIDecision.ts >= today_start)
+                .all()
+            )
+        # Today's realised pnl = revenue (sells) - cost (buys).
+        # Only outcome=placed rows count; holds/errors don't move money.
+        cost = sum(
+            (r.filled_price or 0) * (r.filled_qty or 0)
+            for r in today_rows
+            if r.outcome == "placed" and r.action == "buy"
+        )
+        revenue = sum(
+            (r.filled_price or 0) * (r.filled_qty or 0)
+            for r in today_rows
+            if r.outcome == "placed" and r.action == "sell"
+        )
+        pnl_today = revenue - cost
+        # Rough trade count = placed outcomes (excluding holds with no_trade).
+        trades_today = sum(1 for r in today_rows if r.outcome == "placed")
+        return pnl_today, trades_today
+
     def status(self) -> dict[str, Any]:
         with self._session_factory() as s:
             row = load_or_create(s)
-            return {
-                "status": row.status,
-                "status_reason": row.status_reason,
-                "started_at": row.started_at.isoformat() if row.started_at else None,
-                "last_tick_at": row.last_tick_at.isoformat() if row.last_tick_at else None,
-                "max_order_quote_usdt": row.max_order_quote_usdt,
-                "max_position_per_symbol_usdt": row.max_position_per_symbol_usdt,
-                "daily_loss_cap_usdt": row.daily_loss_cap_usdt,
-                "daily_max_trades": row.daily_max_trades,
-                "symbols": row.symbol_list,
-                "poll_interval_sec": row.poll_interval_sec,
-                "armed_for_live_at": (
-                    row.armed_for_live_at.isoformat() if row.armed_for_live_at else None
-                ),
-            }
+        pnl_today, trades_today = self._compute_today_counters()
+        loss_budget_remaining = float(row.daily_loss_cap_usdt) - pnl_today
+        return {
+            "status": row.status,
+            "status_reason": row.status_reason,
+            "started_at": row.started_at.isoformat() if row.started_at else None,
+            "last_tick_at": row.last_tick_at.isoformat() if row.last_tick_at else None,
+            "max_order_quote_usdt": row.max_order_quote_usdt,
+            "max_position_per_symbol_usdt": row.max_position_per_symbol_usdt,
+            "daily_loss_cap_usdt": row.daily_loss_cap_usdt,
+            "daily_max_trades": row.daily_max_trades,
+            "symbols": row.symbol_list,
+            "poll_interval_sec": row.poll_interval_sec,
+            "armed_for_live_at": (
+                row.armed_for_live_at.isoformat() if row.armed_for_live_at else None
+            ),
+            # Today's counters — same formula as the guards enforce.
+            "pnl_today": pnl_today,
+            "trades_today": trades_today,
+            "loss_budget_remaining_usdt": loss_budget_remaining,
+            # Observability of broker/LLM wiring. Always present.
+            # Plain informational — does NOT hijack the tripwire-owned
+            # `status` state machine (idle/running/paused/stopped/error).
+            "wiring_ok": self.wiring_ok,
+            "broker_wired": self.broker is not None,
+            "llm_wired": self.llm is not None,
+        }
 
     # ---- transitions ---------------------------------------------------
     async def start(self, *, confirm_text: str | None = None) -> dict:
@@ -153,31 +201,8 @@ class AITraderService:
             s.commit()
 
         # Snapshot of today's outcome stats — used by guards 4/5.
-        with self._session_factory() as s:
-            from app.models.ai_decision import AIDecision
-            today_start = datetime.now(UTC).replace(
-                hour=0, minute=0, second=0, microsecond=0
-            )
-            today_rows = (
-                s.query(AIDecision)
-                .filter(AIDecision.ts >= today_start)
-                .all()
-            )
-        # Today's realised pnl = revenue (sells) - cost (buys).
-        # Only outcome=placed rows count; holds/errors don't move money.
-        cost = sum(
-            (r.filled_price or 0) * (r.filled_qty or 0)
-            for r in today_rows
-            if r.outcome == "placed" and r.action == "buy"
-        )
-        revenue = sum(
-            (r.filled_price or 0) * (r.filled_qty or 0)
-            for r in today_rows
-            if r.outcome == "placed" and r.action == "sell"
-        )
-        pnl_today = revenue - cost
-        # Rough trade count = placed outcomes (excluding holds with no_trade).
-        trades_today = sum(1 for r in today_rows if r.outcome == "placed")
+        # Single source of truth; /status uses the same helper.
+        pnl_today, trades_today = self._compute_today_counters()
 
         for symbol in symbols:
             await self._tick_symbol(
