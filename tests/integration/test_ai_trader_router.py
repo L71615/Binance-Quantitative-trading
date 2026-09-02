@@ -520,8 +520,14 @@ def test_live_arming_near_miss_rejected(monkeypatch, client):
 
 
 def test_first_live_arming_lowers_caps_to_conservative_tier(monkeypatch, client):
-    """Per spec §11: first successful live arming downgrades the risk
-    defaults to per-order 20 USDT, daily loss -10 USDT, daily max trades 10."""
+    """Per spec §6/§11: first successful live arming downgrades ALL FOUR risk
+    caps to the conservative live tier — per-order 20 USDT, per-symbol
+    inventory 200 USDT, daily loss -10 USDT, daily max trades 10.
+
+    The per-symbol cap matters as much as the per-order cap: without it a
+    20-USDT-per-order ceiling still lets the LLM accumulate the full
+    testnet-tier 500 USDT of inventory in one symbol via ~25 small buys,
+    well inside the Phase-2 observation window."""
     monkeypatch.setattr(_svc, "_is_live_mode", lambda: True)
     with SessionLocal() as s:
         from app.models.ai_settings import load_or_create
@@ -529,6 +535,7 @@ def test_first_live_arming_lowers_caps_to_conservative_tier(monkeypatch, client)
         row.armed_for_live_at = None
         # Pre-seed testnet-tier values so we can see them get lowered.
         row.max_order_quote_usdt = 50.0
+        row.max_position_per_symbol_usdt = 500.0
         row.daily_loss_cap_usdt = -30.0
         row.daily_max_trades = 20
         s.commit()
@@ -541,6 +548,37 @@ def test_first_live_arming_lowers_caps_to_conservative_tier(monkeypatch, client)
     assert st["max_order_quote_usdt"] == 20.0
     assert st["daily_loss_cap_usdt"] == -10.0
     assert st["daily_max_trades"] == 10
+    assert st["max_position_per_symbol_usdt"] == 200.0, (
+        "first live arming must downgrade the per-symbol inventory cap to the "
+        "conservative tier (spec §6: 500 testnet / 200 live), otherwise a "
+        "20-USDT per-order cap still permits 500 USDT of accumulated inventory"
+    )
+
+
+def test_first_live_arming_never_raises_an_already_stricter_cap(
+    monkeypatch, client
+):
+    """Arming reduces caps; it must never relax one an operator already
+    tightened. Seed a per-symbol cap BELOW the conservative 200 tier and
+    assert arming leaves it alone — this is why the downgrade is `min(...)`
+    and not a plain assignment."""
+    monkeypatch.setattr(_svc, "_is_live_mode", lambda: True)
+    with SessionLocal() as s:
+        from app.models.ai_settings import load_or_create
+        row = load_or_create(s)
+        row.armed_for_live_at = None
+        row.max_position_per_symbol_usdt = 75.0  # stricter than the 200 tier
+        s.commit()
+    r = client.post(
+        "/api/ai-trader/start",
+        json={"confirm_text": "I UNDERSTAND REAL MONEY"},
+    )
+    assert r.status_code == 200
+    st = client.get("/api/ai-trader/status").json()
+    assert st["max_position_per_symbol_usdt"] == 75.0, (
+        "arming must not RAISE a per-symbol cap the operator already set "
+        "stricter than the conservative tier"
+    )
 
 
 def test_settings_put_updates_caps(client, _testnet_mode):

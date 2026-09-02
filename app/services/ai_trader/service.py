@@ -180,6 +180,9 @@ class AITraderService:
                     row.max_order_quote_usdt = min(
                         row.max_order_quote_usdt, 20.0
                     )
+                    row.max_position_per_symbol_usdt = min(
+                        row.max_position_per_symbol_usdt, 200.0
+                    )
                     row.daily_loss_cap_usdt = max(row.daily_loss_cap_usdt, -10.0)
                     row.daily_max_trades = min(row.daily_max_trades, 10)
                     s.commit()

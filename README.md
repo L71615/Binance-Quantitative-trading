@@ -53,7 +53,7 @@ The first step of any hands-on run is wiring LLM credentials. `wiring_ok` only f
    ```bash
    curl -X PUT http://localhost:8000/api/ai-trader/settings \
      -H 'content-type: application/json' \
-     -d '{"max_order_quote_usdt": 20, "daily_loss_cap_usdt": -10, "symbols": ["BTCUSDT"]}'
+     -d '{"max_order_quote_usdt": 50, "max_position_per_symbol_usdt": 500, "daily_loss_cap_usdt": -30, "daily_max_trades": 20, "symbols": ["BTCUSDT"]}'
    ```
 
    `daily_loss_cap_usdt` must be **strictly negative**; `max_order_quote_usdt` and `max_position_per_symbol_usdt` must be **> 0**; `daily_max_trades >= 1`; `poll_interval_sec >= 1`. The router rejects values that would invert a guard.
@@ -94,7 +94,7 @@ Already documented above. Acceptance: no `daily_loss_cap_hit` / `daily_trades_ca
    - daily loss ≥ -10 USDT (i.e. cap is -10, not -30)
    - daily trades ≤ 10
 
-   Implemented in `app/services/ai_trader/service.py` via `min(...)` / `max(...)` — raising before arming makes no difference; arming always reduces caps. This is deliberate. (The per-symbol inventory cap is **not** downgraded at arm time; set it explicitly via `PUT /settings` if you want a conservative per-symbol ceiling.)
+   Implemented in `app/services/ai_trader/service.py` via `min(...)` / `max(...)` — raising before arming makes no difference; arming always reduces caps. This is deliberate. All four caps above are downgraded together at arm time, and a cap you already set **stricter** than the conservative tier is left as-is (arming never raises one).
 4. The same confirmation is required on **`POST /api/ai-trader/reset`** when the service is armed for live. From `stopped` or `error`, reset without the phrase is refused with `409 live_arming_required`. When `armed_for_live_at` is null (testnet), reset takes no confirmation — recovering from a transient LLM outage must not demand a real-money incantation.
 
    ```bash
@@ -112,7 +112,7 @@ After ≥ 7 days of Phase 2 with no emergency-stop trips:
 ```bash
 curl -X PUT http://localhost:8000/api/ai-trader/settings \
   -H 'content-type: application/json' \
-  -d '{"max_order_quote_usdt": 50, "daily_loss_cap_usdt": -30, "daily_max_trades": 20}'
+  -d '{"max_order_quote_usdt": 50, "max_position_per_symbol_usdt": 500, "daily_loss_cap_usdt": -30, "daily_max_trades": 20}'
 ```
 
 Normal-tier defaults: per-order 50 USDT, per-symbol 500 USDT, daily loss -30 USDT, daily trades 20. Raise by **one cap at a time**; never relax the daily loss cap below the value Phase 2 had proven safe.
@@ -134,7 +134,7 @@ The service has five states: `idle`, `running`, `paused`, `stopped`, `error`. Tr
 The tripwire transitions are the ones an operator actually hits:
 
 - **Daily loss / trades cap hit** → status becomes `paused`, `status_reason` is `daily_loss_cap_hit` or `daily_trades_cap_hit`. Wait until the next UTC midnight for counters to roll, then `POST /resume` — or `POST /emergency-stop` first if you want a hard freeze.
-- **5 consecutive LLM errors** → status becomes `error`, `status_reason` is `consecutive_llm_errors:N`. The 60-s tick loop still runs; LLM is just unhealthy. Investigate the LLM service, then `POST /reset` to clear.
+- **5 consecutive LLM errors** → status becomes `error`, `status_reason` is `consecutive_llm_errors:N`. The tick loop stops doing work entirely: `tick()` returns immediately while `status != "running"`, so no LLM call is made, no market context is gathered, and no decision rows are written until the service is recovered. Investigate the LLM service, then `POST /reset` to clear.
 - **`POST /emergency-stop`** → status becomes `stopped`, `status_reason` is `emergency_stopped`. Irreversible from the API side; `POST /reset` is the only way back to `idle`.
 
 Recovery endpoints, in plain curl:
