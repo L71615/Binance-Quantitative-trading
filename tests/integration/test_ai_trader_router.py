@@ -192,3 +192,194 @@ def test_ai_trader_open_through_setup_gate_when_setup_incomplete(client):
     # And decisions list (no setup state needed) is also reachable.
     r2 = client.get("/api/ai-trader/decisions")
     assert r2.status_code == 200
+
+
+# -- Task 11 fix pass 3: the lifespan must wire BOTH clients ---------------
+#
+# These tests drive the REAL app lifespan (via `with TestClient(app)`), which
+# is the production wiring path. Every pre-existing test monkeypatches
+# `trader.llm` directly, so the production path was entirely untested — that
+# is how "the lifespan never calls set_llm" survived three commits.
+#
+# Credentials are injected by monkeypatching `load_secret`, so NOTHING is
+# written to the keyring and no real key appears anywhere. The placeholder
+# base_url uses the reserved `.invalid` TLD, which cannot resolve, so even an
+# accidental request could not reach a real endpoint. No test here makes a
+# network call: BinanceClient builds an httpx.Client but issues no request,
+# and LLMClient builds no client at all (httpx.AsyncClient is created
+# per-call inside .chat(), which we never invoke).
+
+_FAKE_BINANCE_KEY = "fake-binance-key-for-tests"
+_FAKE_BINANCE_SECRET = "fake-binance-secret-for-tests"
+_FAKE_LLM_KEY = "fake-llm-key-for-tests"
+_FAKE_LLM_BASE_URL = "https://llm.invalid/v1"
+
+
+@pytest.fixture
+def wiring_env(monkeypatch):
+    """Isolate the singleton + neutralise ambient LLM env for wiring tests.
+
+    Pinning trader.broker/llm through monkeypatch means whatever the lifespan
+    assigns is rolled back at teardown, so these tests cannot leak a wired
+    singleton into the rest of the suite. Deleting the LLM_* env vars (and
+    clearing the settings cache) makes the "absent credentials" cases
+    deterministic instead of dependent on the developer's shell.
+    """
+    from app.config import get_settings
+    from app.services.ai_trader import service as svc
+
+    monkeypatch.setattr(svc.trader, "broker", None)
+    monkeypatch.setattr(svc.trader, "llm", None)
+    for var in ("LLM_BASE_URL", "LLM_API_KEY", "LLM_MODEL"):
+        monkeypatch.delenv(var, raising=False)
+    get_settings.cache_clear()
+    yield svc.trader
+    # Close the httpx client if a real BinanceClient got wired, then drop the
+    # settings cache so no test-only env leaks into later tests.
+    broker = getattr(svc.trader, "broker", None)
+    if broker is not None and hasattr(broker, "close"):
+        try:
+            broker.close()
+        except Exception:
+            pass
+    get_settings.cache_clear()
+
+
+def _fake_load_secret(*, binance: bool, llm: bool):
+    """Build a load_secret stub for a given credential combination."""
+    values = {}
+    if binance:
+        values["api_key"] = _FAKE_BINANCE_KEY
+        values["api_secret"] = _FAKE_BINANCE_SECRET
+    if llm:
+        values["llm_api_key"] = _FAKE_LLM_KEY
+        values["llm_base_url"] = _FAKE_LLM_BASE_URL
+        values["llm_model"] = "test-model"
+    return lambda slug: values.get(slug)
+
+
+def test_lifespan_wires_llm_and_broker_when_both_credentials_present(
+    monkeypatch, wiring_env
+):
+    """The realistic production case: both Binance and LLM credentials are
+    configured, so the lifespan must wire BOTH clients and /status must
+    report wiring_ok=True.
+
+    This case was previously IMPOSSIBLE: the lifespan only ever called
+    set_broker, so trader.llm stayed None forever and wiring_ok could never
+    be True in production. No existing test would have noticed.
+    """
+    from app.services.llm import LLMClient
+
+    monkeypatch.setattr(
+        "app.crypto_store.load_secret", _fake_load_secret(binance=True, llm=True)
+    )
+    with TestClient(app) as c:
+        trader = wiring_env
+        assert trader.broker is not None, "lifespan did not wire the broker"
+        assert trader.llm is not None, (
+            "lifespan did not wire the LLM — trader.llm is still None, so the "
+            "tick loop can never reach an LLM and /dry-run returns 503 forever"
+        )
+        # It must be the real client, configured from the injected creds.
+        assert isinstance(trader.llm, LLMClient)
+        assert trader.llm.is_configured() is True
+        assert trader.llm.base_url == _FAKE_LLM_BASE_URL
+        assert trader.llm.model == "test-model"
+
+        r = c.get("/api/ai-trader/status")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["broker_wired"] is True
+        assert data["llm_wired"] is True
+        assert data["wiring_ok"] is True, (
+            "wiring_ok must be True when both Binance and LLM credentials "
+            f"are configured; got {data!r}"
+        )
+        # /dry-run's guard is `not trader.llm or not trader.broker`. Assert
+        # that condition is now False rather than calling the endpoint —
+        # invoking it would make a REAL network call to the LLM.
+        assert not (not trader.llm or not trader.broker), (
+            "dry-run would still return 503 in production"
+        )
+
+
+def test_lifespan_cold_start_with_no_credentials_still_boots(
+    monkeypatch, wiring_env
+):
+    """Hard constraint: no Binance creds and no LLM creds (this machine's
+    actual state) must still boot, and /status must respond wiring_ok=False."""
+    monkeypatch.setattr(
+        "app.crypto_store.load_secret", _fake_load_secret(binance=False, llm=False)
+    )
+    with TestClient(app) as c:
+        trader = wiring_env
+        assert trader.broker is None
+        assert trader.llm is None
+        r = c.get("/api/ai-trader/status")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["status"] == "idle"
+        assert data["broker_wired"] is False
+        assert data["llm_wired"] is False
+        assert data["wiring_ok"] is False
+        # And dry-run degrades to a clean 503 rather than crashing.
+        assert c.get("/api/ai-trader/dry-run?symbol=BTCUSDT").status_code == 503
+
+
+@pytest.mark.parametrize(
+    "binance,llm",
+    [(True, False), (False, True)],
+    ids=["binance_only", "llm_only"],
+)
+def test_lifespan_partial_credentials_leave_wiring_ok_false(
+    monkeypatch, wiring_env, binance, llm
+):
+    """Half-configured is not configured: exactly one client wired means
+    wiring_ok=False, and the per-client flags still report the truth."""
+    monkeypatch.setattr(
+        "app.crypto_store.load_secret", _fake_load_secret(binance=binance, llm=llm)
+    )
+    with TestClient(app) as c:
+        trader = wiring_env
+        assert (trader.broker is not None) is binance
+        assert (trader.llm is not None) is llm
+        data = c.get("/api/ai-trader/status").json()
+        assert data["broker_wired"] is binance
+        assert data["llm_wired"] is llm
+        assert data["wiring_ok"] is False
+        assert data["wiring_ok"] == (data["broker_wired"] and data["llm_wired"])
+
+
+def test_lifespan_malformed_settings_leaves_status_responding_unwired(
+    monkeypatch, wiring_env
+):
+    """The narrowed `except (pydantic.ValidationError,)` path.
+
+    `wiring_ok` is now a derived read-only property, so the handler can no
+    longer assign `_ai_trader.wiring_ok = False` (that would raise
+    AttributeError). It clears both clients instead — which is both honest
+    and stronger, since it also prevents a half-wired singleton from being
+    used. Assert the app still boots and /status reports not-wired.
+    """
+    import pydantic
+
+    def _boom():
+        raise pydantic.ValidationError.from_exception_data("Settings", [])
+
+    # Binance creds present, so without the raise the broker WOULD be wired;
+    # this proves the handler actively clears a partially-wired singleton.
+    monkeypatch.setattr(
+        "app.crypto_store.load_secret", _fake_load_secret(binance=True, llm=True)
+    )
+    monkeypatch.setattr("app.config.get_settings", _boom)
+    with TestClient(app) as c:
+        trader = wiring_env
+        assert trader.broker is None, "handler must clear a half-wired broker"
+        assert trader.llm is None
+        r = c.get("/api/ai-trader/status")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["wiring_ok"] is False
+        assert data["broker_wired"] is False
+        assert data["llm_wired"] is False

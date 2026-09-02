@@ -36,29 +36,40 @@ class AITraderService:
         self.broker = broker
         self._session_factory = db_session_factory or SessionLocal
         self.grid_has_open_orders = grid_has_open_orders or (lambda s: False)
-        # Observability for the read-only /status surface. main.py flips this
-        # True when the broker is wired successfully during lifespan. A failed
-        # or absent wiring must surface in /status — never silently idle.
-        self.wiring_ok: bool = broker is not None
 
-    # ---- wiring setters -----------------------------------------------
-    # These exist so a future code path (Task 12 control endpoints, settings
-    # PUT, etc.) that swaps the broker or LLM cannot leave the three flags
-    # on /status (wiring_ok, broker_wired, llm_wired) out of sync. The flag
-    # invariant is:
-    #     wiring_ok   == (self.broker is not None) and (self.llm is not None)
+    # ---- wiring -------------------------------------------------------
+    # Observability for the read-only /status surface. A failed or absent
+    # wiring must surface in /status — never silently idle. The three flags
+    # /status publishes are ALL derived from the two client attributes:
+    #
+    #     wiring_ok    == (self.broker is not None) and (self.llm is not None)
     #     broker_wired == self.broker is not None
     #     llm_wired    == self.llm is not None
-    # All three are derived from the attribute state and maintained
-    # atomically by the setters. Direct attribute assignment MUST go
-    # through these setters; bypassing them is a bug.
+    #
+    # `wiring_ok` is a read-only property, not a stored bool, on purpose. A
+    # stored copy has to be recomputed at every mutation site — the
+    # constructor, set_broker, set_llm, main.py's lifespan exception
+    # handler, and any future Task 12 control endpoint — and any site that
+    # forgets it drifts out of sync with the client state. That is exactly
+    # the bug this replaced: __init__ computed `broker is not None` while
+    # the setters computed `broker is not None and llm is not None`, so
+    # identical client state reported a different wiring_ok depending on
+    # whether it arrived via the constructor or via a setter. A derived
+    # property cannot drift. It also makes "force the flag independently of
+    # the clients" unrepresentable, which is the correct constraint:
+    # /status must describe reality, not an intention.
+    @property
+    def wiring_ok(self) -> bool:
+        return self.broker is not None and self.llm is not None
+
+    # Mutation entrypoints. Prefer these over direct attribute assignment:
+    # they are the documented API for rewiring the singleton and keep call
+    # sites honest that swapping a client changes what /status reports.
     def set_broker(self, broker: Any | None) -> None:
         self.broker = broker
-        self.wiring_ok = broker is not None and self.llm is not None
 
     def set_llm(self, llm: Any | None) -> None:
         self.llm = llm
-        self.wiring_ok = self.broker is not None and llm is not None
 
     # ---- status helpers -----------------------------------------------
     def _settings(self) -> AISettings:

@@ -37,9 +37,12 @@ async def lifespan(app: FastAPI):
     DATA_DIR.mkdir(exist_ok=True)
     Base.metadata.create_all(engine)
     await lifecycle.start()
-    # Wire the AI Trader singleton with a live BinanceClient if credentials
-    # are present. Missing credentials are fine — the service still boots
-    # and the read endpoints keep responding.
+    # Wire the AI Trader singleton with a live BinanceClient and a live
+    # LLMClient if credentials are present. Missing credentials are fine —
+    # the service still boots and the read endpoints keep responding.
+    # BOTH clients are required for the feature to function: /dry-run guards
+    # on `trader.llm and trader.broker`, and `_tick_symbol` returns early
+    # unless both are set. Wiring only the broker leaves the feature inert.
     #
     # Component analysis (verified by reading the code):
     #   - get_settings() in app/config.py: constructs a pydantic-settings
@@ -57,17 +60,27 @@ async def lifespan(app: FastAPI):
     #     `httpx.Client(base_url=<constant>, timeout=10.0)`. With those
     #     inputs it cannot raise — auth failures are deferred to the
     #     first network call, not the constructor.
+    #   - LLMClient.__init__ in app/services/llm.py: calls get_settings()
+    #     (same ValidationError as above, already covered), then
+    #     `(base_url or s.llm_base_url).rstrip("/")`. `Settings.llm_base_url`
+    #     is `str` with `default=""`, so the `or` operand is never None and
+    #     `.rstrip` cannot raise AttributeError. Unlike BinanceClient it
+    #     builds NO http client in __init__ (httpx.AsyncClient is created
+    #     per-call inside .chat()), so it opens no socket here and adds no
+    #     new failure mode. Auth failures surface on the first .chat().
     #
-    # Therefore the only LEGITIMATE, recoverable exception here is a
-    # malformed pydantic settings payload. We narrow `except` to that
-    # tuple. Any other exception (AttributeError after a rename, NameError,
-    # TypeError, KeyError, etc.) is a programmer error and must propagate
-    # so a typo doesn't silently disable live trading.
+    # Therefore the only LEGITIMATE, recoverable exception here is still a
+    # malformed pydantic settings payload — wiring the LLM introduced no new
+    # recoverable exception type, so the `except` tuple stays as-is. Any
+    # other exception (AttributeError after a rename, NameError, TypeError,
+    # KeyError, etc.) is a programmer error and must propagate so a typo
+    # doesn't silently disable live trading.
     try:
         from app.broker.binance import BinanceClient
         from app.config import get_settings
         from app.crypto_store import load_secret
         from app.services.ai_trader.service import trader as ai_trader
+        from app.services.llm import LLMClient
         cfg = get_settings()
         api_key = load_secret("api_key") or ""
         api_secret = load_secret("api_secret") or ""
@@ -77,15 +90,38 @@ async def lifespan(app: FastAPI):
             )
         else:
             # No creds — cold start. Service is bootable but not wired.
-            # set_broker(None) keeps the wiring_ok flag invariant intact.
             ai_trader.set_broker(None)
+        # LLM: keyring is canonical, env/settings is the dev fallback (same
+        # precedence the broker half uses). Require both base_url and api_key
+        # — that is exactly LLMClient.is_configured(), so we never hand the
+        # tick loop a client whose every .chat() would raise LLMError.
+        llm_base_url = load_secret("llm_base_url") or cfg.llm_base_url or ""
+        llm_api_key = load_secret("llm_api_key") or cfg.llm_api_key or ""
+        llm_model = load_secret("llm_model") or cfg.llm_model or None
+        if llm_base_url and llm_api_key:
+            ai_trader.set_llm(
+                LLMClient(
+                    base_url=llm_base_url, api_key=llm_api_key, model=llm_model
+                )
+            )
+        else:
+            # No LLM creds — cold start. /status reports llm_wired=False and
+            # wiring_ok=False; /dry-run returns 503 until creds are added.
+            ai_trader.set_llm(None)
     except (pydantic.ValidationError,):
         # Malformed env / config — recoverable, surface via logger +
         # via /status (wiring_ok=False).
-        logger.exception("AI Trader broker wiring failed during lifespan")
+        logger.exception("AI Trader broker/LLM wiring failed during lifespan")
         try:
             from app.services.ai_trader.service import trader as _ai_trader
-            _ai_trader.wiring_ok = False
+            # `wiring_ok` is a derived read-only property on the service, so
+            # there is no flag to force here — and forcing one would be a
+            # lie. Clearing BOTH clients is the honest way to express "not
+            # wired": it makes wiring_ok, broker_wired and llm_wired all
+            # False, and it also prevents a half-wired singleton (e.g. the
+            # broker landed, then get_settings() raised) from being used.
+            _ai_trader.set_broker(None)
+            _ai_trader.set_llm(None)
         except Exception:
             pass
     yield

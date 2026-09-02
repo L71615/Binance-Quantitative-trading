@@ -351,10 +351,75 @@ def test_wiring_setters_keep_flags_consistent():
     assert st["llm_wired"] is True
     assert st["wiring_ok"] is True
 
-    # And the symmetric path: setting LLM first, then broker, must also
-    # leave wiring_ok=True only at the end.
-    s2 = AITraderService()
-    s2.set_llm(FakeLLM([]))
-    assert s2.status()["wiring_ok"] is False
-    s2.set_broker(FakeBroker())
-    assert s2.status()["wiring_ok"] is True
+# -- Task 11 fix pass 3: wiring_ok is derived, not stored -----------------
+
+
+def test_wiring_ok_is_derived_identically_via_constructor_and_setters():
+    """`wiring_ok` must depend ONLY on the client state — never on HOW that
+    state arrived.
+
+    Regression guard for the fix-pass-3 defect: `__init__` used to compute
+    `wiring_ok = broker is not None` (ignoring llm) while the setters
+    computed `broker is not None and llm is not None`. Identical client
+    state therefore reported a different wiring_ok depending on whether it
+    came from the constructor or a setter. Assert every one of the four
+    client combinations agrees across both construction paths.
+    """
+    from app.services.ai_trader.service import AITraderService
+
+    for want_broker in (False, True):
+        for want_llm in (False, True):
+            broker = FakeBroker() if want_broker else None
+            llm = FakeLLM([]) if want_llm else None
+            expected = want_broker and want_llm
+
+            # Path A: via the constructor.
+            a = AITraderService(broker=broker, llm=llm)
+            # Path B: cold, then via the setters.
+            b = AITraderService()
+            b.set_broker(broker)
+            b.set_llm(llm)
+
+            assert a.wiring_ok is expected, (
+                f"constructor(broker={want_broker}, llm={want_llm}) gave "
+                f"wiring_ok={a.wiring_ok}, expected {expected}"
+            )
+            assert b.wiring_ok is expected, (
+                f"setters(broker={want_broker}, llm={want_llm}) gave "
+                f"wiring_ok={b.wiring_ok}, expected {expected}"
+            )
+            assert a.wiring_ok == b.wiring_ok, (
+                "wiring_ok differs between constructor and setter paths for "
+                f"identical client state (broker={want_broker}, llm={want_llm})"
+            )
+            # /status must agree with the attribute, and the three flags
+            # must be mutually consistent.
+            for svc in (a, b):
+                st = svc.status()
+                assert st["broker_wired"] is want_broker
+                assert st["llm_wired"] is want_llm
+                assert st["wiring_ok"] is expected
+                assert st["wiring_ok"] == (
+                    st["broker_wired"] and st["llm_wired"]
+                )
+
+
+def test_wiring_ok_cannot_be_forced_out_of_sync():
+    """`wiring_ok` is a read-only derived property: no code path (including
+    a future Task 12 control endpoint or main.py's exception handler) can
+    pin it to a value that contradicts the clients."""
+    from app.services.ai_trader.service import AITraderService
+
+    s = AITraderService(broker=FakeBroker(), llm=FakeLLM([]))
+    assert s.wiring_ok is True
+    # Attempting to force the flag must fail loudly rather than create drift.
+    with pytest.raises(AttributeError):
+        s.wiring_ok = False
+    assert s.wiring_ok is True, "wiring_ok was mutated despite the raise"
+    # The honest way to express "not wired" is to clear the clients.
+    s.set_broker(None)
+    s.set_llm(None)
+    st = s.status()
+    assert st["wiring_ok"] is False
+    assert st["broker_wired"] is False
+    assert st["llm_wired"] is False
