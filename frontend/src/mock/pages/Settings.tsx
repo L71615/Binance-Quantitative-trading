@@ -7,6 +7,10 @@ export function Settings() {
   const [s, setS] = useState<SettingsShape>(initialSettings)
   const [apiKey, setApiKey] = useState('')
   const [apiSecret, setApiSecret] = useState('')
+  // LLM API key follows the same convention as the Binance secret above:
+  // the value never round-trips from the fixture, it lives in a write-only
+  // local field and `hasLlmApiKey` is the only thing persisted/rendered.
+  const [llmApiKey, setLlmApiKey] = useState('')
   const [msg, setMsg] = useState('')
   const [busy, setBusy] = useState(false)
 
@@ -19,10 +23,12 @@ export function Settings() {
         ...s,
         hasApiKey: s.hasApiKey || apiKey.length > 0,
         hasApiSecret: s.hasApiSecret || apiSecret.length > 0,
+        hasLlmApiKey: s.hasLlmApiKey || llmApiKey.length > 0,
       }
       setS(updated)
       setApiKey('')
       setApiSecret('')
+      setLlmApiKey('')
       setMsg('✓ 已保存 (mock,未实际写入凭据管理器)')
     }, 300)
   }
@@ -35,6 +41,11 @@ export function Settings() {
       setMsg('✓ 连通成功 (canTrade=true, testnet=' + s.testnet + ')')
     }, 500)
   }
+
+  // Backend lifespan only constructs the LLM client when BOTH base_url and
+  // api_key are present, so the wired flag mirrors that conjunction.
+  const hasLlmBaseUrl = (s.llmBaseUrl ?? '').trim().length > 0
+  const llmWired = (s.hasLlmApiKey ?? false) && hasLlmBaseUrl
 
   return (
     <div className="space-y-6">
@@ -94,6 +105,88 @@ export function Settings() {
               测试连通
             </button>
           </div>
+        </div>
+      </Card>
+
+      <Card
+        title="LLM Configuration"
+        right={
+          <span className="text-xs font-mono text-slate-500">
+            AI Trader · /api/ai/analyze 共用同一份配置
+          </span>
+        }
+      >
+        <div className="space-y-4">
+          <div className="flex flex-wrap gap-4 text-xs font-mono">
+            <Badge ok={s.hasLlmApiKey ?? false}>
+              API Key {s.hasLlmApiKey ? '已设置' : '未设置'}
+            </Badge>
+            <Badge ok={hasLlmBaseUrl}>
+              Base URL {hasLlmBaseUrl ? '已设置' : '未设置'}
+            </Badge>
+            <Badge ok={llmWired}>llm_wired {llmWired ? 'true' : 'false'}</Badge>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div>
+              <label className="block text-xs text-slate-400 mb-1">
+                LLM API Key
+                <span className="text-slate-600 ml-1">(留空表示不修改)</span>
+              </label>
+              <input
+                type="password"
+                value={llmApiKey}
+                onChange={(e) => setLlmApiKey(e.target.value)}
+                placeholder={s.hasLlmApiKey ? '•••••••• 已设置' : 'sk-...'}
+                className={inputCls('font-mono')}
+                autoComplete="off"
+                spellCheck={false}
+              />
+            </div>
+            <div>
+              <label className="block text-xs text-slate-400 mb-1">
+                Base URL
+                <span className="text-slate-600 ml-1">(必填 · 需与 API Key 同时提供)</span>
+              </label>
+              <input
+                type="text"
+                value={s.llmBaseUrl ?? ''}
+                onChange={(e) => setS({ ...s, llmBaseUrl: e.target.value })}
+                placeholder="https://api.example.com/v1"
+                className={inputCls('font-mono')}
+              />
+            </div>
+            <div>
+              <label className="block text-xs text-slate-400 mb-1">
+                Model
+                <span className="text-slate-600 ml-1">(留空则使用后端默认值)</span>
+              </label>
+              <input
+                type="text"
+                value={s.llmModel ?? ''}
+                onChange={(e) => setS({ ...s, llmModel: e.target.value })}
+                placeholder="deepseek-chat"
+                className={inputCls('font-mono')}
+              />
+            </div>
+          </div>
+
+          {!llmWired && (
+            <div className="p-3 bg-amber-950/30 border border-amber-900/60 rounded text-xs font-mono text-amber-200">
+              LLM 未接通 — 后端只有在 <code>llm_base_url</code> 与{' '}
+              <code>llm_api_key</code> 两者都存在时才会创建 LLM 客户端,缺一不可。
+              当前 <code>broker_wired: true</code> · <code>llm_wired: false</code> ·{' '}
+              <code>wiring_ok: false</code>,<code>GET /api/ai-trader/dry-run</code>{' '}
+              会返回 503,直到这两项都补齐。
+            </div>
+          )}
+
+          <p className="text-xs text-slate-500">
+            凭据由后端写入 OS keyring (service <code>binance-spot-grid-bot</code>,slug{' '}
+            <code>llm_api_key</code> / <code>llm_base_url</code> /{' '}
+            <code>llm_model</code>) — 全局只有一份 LLM 配置,AI Trader 与{' '}
+            <code>/api/ai/analyze</code> 共用,不区分两套。
+          </p>
         </div>
       </Card>
 

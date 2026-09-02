@@ -91,6 +91,13 @@ export type SettingsShape = {
   pollingIntervalMs: number
   maxGrids: number
   maxPositionSizeUsdt: number
+  // LLM config — backend keeps these in the OS keyring under service
+  // `binance-spot-grid-bot` as slugs llm_api_key / llm_base_url / llm_model.
+  // The key itself is never read back into the UI; only `hasLlmApiKey` is.
+  llmApiKey?: string
+  hasLlmApiKey?: boolean
+  llmBaseUrl?: string
+  llmModel?: string
 }
 
 export const overview: Overview = {
@@ -308,6 +315,12 @@ export const initialSettings: SettingsShape = {
   pollingIntervalMs: 1000,
   maxGrids: 10,
   maxPositionSizeUsdt: 5000,
+  // Matches this machine's real state: keyring has Binance creds but no LLM
+  // creds, so the backend reports llm_wired: false / wiring_ok: false.
+  llmApiKey: '',
+  hasLlmApiKey: false,
+  llmBaseUrl: 'https://api.deepseek.com/v1',
+  llmModel: 'deepseek-chat',
 }
 
 export type AIStatus = 'idle' | 'running' | 'paused' | 'stopped' | 'error'
