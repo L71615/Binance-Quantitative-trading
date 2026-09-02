@@ -6,6 +6,7 @@ import { Grids } from './mock/pages/Grids'
 import { Orders } from './mock/pages/Orders'
 import { Trades } from './mock/pages/Trades'
 import { Logs } from './mock/pages/Logs'
+import { AITrader } from './mock/pages/AITrader'
 import { Settings } from './mock/pages/Settings'
 
 function AppMock() {
@@ -23,6 +24,7 @@ function AppMock() {
       {page === 'orders' && <Orders />}
       {page === 'trades' && <Trades />}
       {page === 'logs' && <Logs />}
+      {page === 'ai-trader' && <AITrader />}
       {page === 'settings' && <Settings />}
     </Layout>
   )

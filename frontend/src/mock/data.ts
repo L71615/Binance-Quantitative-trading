@@ -309,3 +309,127 @@ export const initialSettings: SettingsShape = {
   maxGrids: 10,
   maxPositionSizeUsdt: 5000,
 }
+
+export type AIStatus = 'idle' | 'running' | 'paused' | 'stopped' | 'error'
+
+export type AISettings = {
+  enabled: boolean
+  status: AIStatus
+  status_reason: string | null
+  last_tick_at: string | null
+  trades_today: number | null
+  poll_interval_sec: number
+  max_order_quote_usdt: number
+  max_position_per_symbol_usdt: number
+  daily_loss_cap_usdt: number
+  daily_max_trades: number
+  symbols: string[]
+  armed_for_live_at: string | null
+  testnet: boolean
+  realized_pnl_today_usdt: number
+  loss_consumed_usdt: number
+}
+
+export type AIDecisionOutcome = 'placed' | 'rejected' | 'no_trade' | 'error'
+export type AIDecisionAction = 'buy' | 'sell' | 'hold'
+
+export type AIDecisionRow = {
+  id: number
+  ts: string
+  symbol: string
+  action: AIDecisionAction
+  outcome: AIDecisionOutcome
+  order_id: string | null
+  filled_qty: number | null
+  filled_price: number | null
+  pnl_usdt: number | null
+  error: string | null
+  prompt: string
+  raw_response: string
+  parsed_json: string
+  guard_results: { name: string; passed: boolean; detail: string }[]
+}
+
+export const aiStatus: AISettings = {
+  enabled: false,
+  status: 'idle',
+  status_reason: null,
+  last_tick_at: null,
+  trades_today: 0,
+  poll_interval_sec: 60,
+  max_order_quote_usdt: 20,
+  max_position_per_symbol_usdt: 200,
+  daily_loss_cap_usdt: -10,
+  daily_max_trades: 10,
+  symbols: ['BTCUSDT'],
+  armed_for_live_at: null,
+  testnet: true,
+  realized_pnl_today_usdt: 0,
+  loss_consumed_usdt: 0,
+}
+
+export const aiDecisions: AIDecisionRow[] = [
+  {
+    id: 1,
+    ts: '14:23:01',
+    symbol: 'BTCUSDT',
+    action: 'hold',
+    outcome: 'no_trade',
+    order_id: null,
+    filled_qty: null,
+    filled_price: null,
+    pnl_usdt: null,
+    error: null,
+    prompt: '{"role":"system","content":"…strict JSON schema…"}',
+    raw_response: '{"action":"hold","symbol":"BTCUSDT","reason":"no clear edge"}',
+    parsed_json: '{"action":"hold","symbol":"BTCUSDT","reason":"no clear edge"}',
+    guard_results: [
+      { name: 'schema', passed: true, detail: 'parsed cleanly' },
+      { name: 'symbol_exclusive', passed: true, detail: 'hold → skipped' },
+    ],
+  },
+  {
+    id: 2,
+    ts: '14:22:01',
+    symbol: 'BTCUSDT',
+    action: 'buy',
+    outcome: 'placed',
+    order_id: '9001',
+    filled_qty: 0.001,
+    filled_price: 60200.1,
+    pnl_usdt: null,
+    error: null,
+    prompt: '{"role":"system","content":"…strict JSON schema…"}',
+    raw_response: '{"action":"buy","symbol":"BTCUSDT","quote_usdt":60.20,"reason":"breakout"}',
+    parsed_json: '{"action":"buy","symbol":"BTCUSDT","quote_usdt":60.20,"reason":"breakout"}',
+    guard_results: [
+      { name: 'schema', passed: true, detail: 'parsed cleanly' },
+      { name: 'per_order_cap', passed: true, detail: '60.20 within cap' },
+      { name: 'position_cap', passed: true, detail: 'within limit' },
+      { name: 'symbol_exclusive', passed: true, detail: 'no open order on BTCUSDT' },
+    ],
+  },
+  {
+    id: 3,
+    ts: '14:21:01',
+    symbol: 'BTCUSDT',
+    action: 'buy',
+    outcome: 'rejected',
+    order_id: null,
+    filled_qty: null,
+    filled_price: null,
+    pnl_usdt: null,
+    error: 'exceeds_per_order_cap: 87.40 > 20.00 USDT',
+    prompt: '{"role":"system","content":"…strict JSON schema…"}',
+    raw_response: '{"action":"buy","symbol":"BTCUSDT","quote_usdt":87.40,"reason":"strong signal"}',
+    parsed_json: '{"action":"buy","symbol":"BTCUSDT","quote_usdt":87.40,"reason":"strong signal"}',
+    guard_results: [
+      { name: 'schema', passed: true, detail: 'parsed cleanly' },
+      { name: 'per_order_cap', passed: false, detail: '87.40 > 20.00' },
+      { name: 'position_cap', passed: true, detail: 'n/a (rejected upstream)' },
+      { name: 'daily_loss', passed: true, detail: 'budget intact' },
+      { name: 'daily_trades', passed: true, detail: '0 / 10 used' },
+      { name: 'symbol_exclusive', passed: true, detail: 'no open order' },
+    ],
+  },
+]

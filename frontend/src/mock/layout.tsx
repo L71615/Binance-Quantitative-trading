@@ -7,6 +7,7 @@ export type PageId =
   | 'orders'
   | 'trades'
   | 'logs'
+  | 'ai-trader'
   | 'settings'
 
 export const NAV: { id: PageId; label: string; sub: string }[] = [
@@ -16,6 +17,7 @@ export const NAV: { id: PageId; label: string; sub: string }[] = [
   { id: 'orders', label: 'Orders', sub: '订单' },
   { id: 'trades', label: 'Trades', sub: '成交' },
   { id: 'logs', label: 'Logs', sub: '日志' },
+  { id: 'ai-trader', label: 'AI Trader', sub: '全自动' },
   { id: 'settings', label: 'Settings', sub: '设置' },
 ]
 
@@ -26,6 +28,7 @@ const PAGE_TITLE: Record<PageId, string> = {
   orders: 'Orders',
   trades: 'Trades',
   logs: 'Logs',
+  'ai-trader': 'AI Trader',
   settings: 'Settings',
 }
 
