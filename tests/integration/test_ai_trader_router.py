@@ -670,3 +670,141 @@ def test_emergency_stop_blocks_subsequent_tick(client, monkeypatch):
     assert after == baseline, (
         f"tick after emergency-stop wrote {after - baseline} decision rows"
     )
+
+
+# -- Fix pass: reset() requires live confirm_text when armed_for_live_at is set
+#
+# Rationale (per controller): reset() now also recovers from `status == "error"`,
+# which Task 10's tripwires enter after 5 consecutive LLM failures. Forcing the
+# `I UNDERSTAND REAL MONEY` incantation to clear a transient upstream outage is
+# bad UX and semantically false (reset only returns to idle, doesn't itself
+# trade). But when the service IS armed for live, resetting is the step that
+# puts a real-money-capable service back within one `start` of trading, so it
+# deserves the same gate as `start`.
+#
+# The testnet-only project state must keep working: when
+# `armed_for_live_at is None`, reset accepts no confirm_text at all.
+
+
+def test_reset_no_confirm_needed_when_not_armed_for_live(client, _testnet_mode):
+    """Regression-protect the current-state path: testnet (armed_for_live_at
+    null) → reset() succeeds with no body and no confirm_text."""
+    # Force the testnet precondition: prior tests in this module may have
+    # armed the singleton for live (e.g. test_live_arming_with_confirm_succeeds).
+    # The DB persists across tests in this file because setup_module only
+    # runs once.
+    with SessionLocal() as s:
+        from app.models.ai_settings import load_or_create
+        row = load_or_create(s)
+        row.armed_for_live_at = None
+        s.commit()
+    # Drive into `stopped` via the public surface.
+    assert client.post("/api/ai-trader/start").status_code == 200
+    assert client.post("/api/ai-trader/emergency-stop").status_code == 200
+    st = client.get("/api/ai-trader/status").json()
+    assert st["status"] == "stopped"
+    assert st["armed_for_live_at"] is None  # testnet precondition
+    # No body, no confirm_text — must succeed exactly as today.
+    r = client.post("/api/ai-trader/reset")
+    assert r.status_code == 200
+    assert r.json()["status"] == "idle"
+    assert client.get("/api/ai-trader/status").json()["status"] == "idle"
+
+
+def test_reset_armed_with_correct_confirm_succeeds(monkeypatch, client):
+    """Armed-for-live + exact `I UNDERSTAND REAL MONEY` → reset succeeds."""
+    from datetime import datetime, UTC as _UTC
+    monkeypatch.setattr(_svc, "_is_live_mode", lambda: True)
+    with SessionLocal() as s:
+        from app.models.ai_settings import load_or_create
+        row = load_or_create(s)
+        row.status = "stopped"
+        row.armed_for_live_at = datetime.now(_UTC)
+        s.commit()
+    r = client.post(
+        "/api/ai-trader/reset",
+        json={"confirm_text": "I UNDERSTAND REAL MONEY"},
+    )
+    assert r.status_code == 200
+    assert r.json()["status"] == "idle"
+    assert client.get("/api/ai-trader/status").json()["status"] == "idle"
+
+
+def test_reset_armed_with_wrong_confirm_refused_near_miss(monkeypatch, client):
+    """Armed-for-live + a NEAR-MISS confirm_text → refused with the same
+    409 shape `start()` uses, and status unchanged. This test must fail if
+    someone later loosens the comparison to `.strip().upper()` or `in`."""
+    from datetime import datetime, UTC as _UTC
+    monkeypatch.setattr(_svc, "_is_live_mode", lambda: True)
+    with SessionLocal() as s:
+        from app.models.ai_settings import load_or_create
+        row = load_or_create(s)
+        row.status = "stopped"
+        row.armed_for_live_at = datetime.now(_UTC)
+        s.commit()
+
+    # Mix of near-misses — wrong case, trailing whitespace, leading whitespace,
+    # trailing punctuation. All must be refused.
+    near_misses = (
+        "i understand real money",        # wrong case
+        "I UNDERSTAND REAL MONEY ",       # trailing whitespace
+        "I UNDERSTAND REAL MONEY.",       # trailing punctuation
+        " I UNDERSTAND REAL MONEY",       # leading whitespace
+    )
+    for near_miss in near_misses:
+        # Re-arm status (a refused reset must not flip status).
+        with SessionLocal() as s:
+            row = load_or_create(s)
+            row.status = "stopped"
+            s.commit()
+        r = client.post(
+            "/api/ai-trader/reset",
+            json={"confirm_text": near_miss},
+        )
+        assert r.status_code == 409, (
+            f"near-miss {near_miss!r} was accepted (got {r.status_code}); "
+            "exact-match is required"
+        )
+        body = r.json()
+        # Same shape as start()'s live_arming_required refusal — at the
+        # top level (not wrapped in `detail`), with required_confirm_text.
+        assert body["error"] == "live_arming_required", (
+            f"near-miss {near_miss!r} got {body!r}; expected error="
+            f"live_arming_required at top level (not detail-wrapped)"
+        )
+        assert body["required_confirm_text"] == "I UNDERSTAND REAL MONEY"
+        # Status unchanged — still "stopped", NOT "idle".
+        st = client.get("/api/ai-trader/status").json()
+        assert st["status"] == "stopped", (
+            f"near-miss {near_miss!r} flipped status to {st['status']!r}; "
+            "refused reset must not mutate status"
+        )
+    # And armed_for_live_at must still be set (the gate refused — no reset).
+    st = client.get("/api/ai-trader/status").json()
+    assert st["armed_for_live_at"] is not None
+
+
+def test_reset_armed_with_confirm_absent_refused(monkeypatch, client):
+    """Armed-for-live + no confirm_text at all → refused, status unchanged."""
+    from datetime import datetime, UTC as _UTC
+    monkeypatch.setattr(_svc, "_is_live_mode", lambda: True)
+    with SessionLocal() as s:
+        from app.models.ai_settings import load_or_create
+        row = load_or_create(s)
+        row.status = "stopped"
+        row.armed_for_live_at = datetime.now(_UTC)
+        s.commit()
+    # No body at all.
+    r = client.post("/api/ai-trader/reset")
+    assert r.status_code == 409
+    body = r.json()
+    assert body["error"] == "live_arming_required"
+    assert body["required_confirm_text"] == "I UNDERSTAND REAL MONEY"
+    # Status unchanged.
+    assert client.get("/api/ai-trader/status").json()["status"] == "stopped"
+    # And the same gate must refuse an empty-string confirm_text too —
+    # empty is not the exact phrase.
+    r2 = client.post("/api/ai-trader/reset", json={"confirm_text": ""})
+    assert r2.status_code == 409
+    assert r2.json()["error"] == "live_arming_required"
+    assert client.get("/api/ai-trader/status").json()["status"] == "stopped"

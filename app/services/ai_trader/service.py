@@ -23,6 +23,22 @@ def _is_live_mode() -> bool:
         return False
 
 
+def _live_confirm_refusal(armed_for_live_at, confirm_text):
+    """Standard live-arming refusal builder.
+
+    Used by `reset()` when the service IS armed for live: any call without the
+    exact `_LIVE_CONFIRM` phrase is refused. (For `start()` the symmetric case
+    is the OPPOSITE — refusal only while NOT yet armed — so `start()` inlines
+    its own gate. The check itself is one line; what is shared across the two
+    endpoints is the refusal body shape, kept identical via this helper.)
+    """
+    return {
+        "ok": False,
+        "error": "live_arming_required",
+        "required_confirm_text": _LIVE_CONFIRM,
+    }
+
+
 class AITraderService:
     def __init__(
         self,
@@ -210,15 +226,25 @@ class AITraderService:
         # Spec §3 state diagram: reset() recovers from BOTH stopped and error.
         # Task 10's tripwires can land the service in `error` after 5
         # consecutive LLM failures, and without accepting `error` here that
-        # state was only recoverable by hand-editing the database. `confirm_text`
-        # is accepted but not required: the brief's `POST /reset` body has
-        # `confirm_text?` (optional); the arming gate is enforced only on
-        # `start`. Refusing from any other state (running, paused, idle) keeps
-        # `reset` a recovery verb, not a free teleport.
+        # state was only recoverable by hand-editing the database.
+        #
+        # Live-arming gate (asymmetric with `start()`):
+        # - `start()` refuses when NOT yet armed and caller didn't supply the
+        #   exact phrase — that's the first-time arming flow.
+        # - `reset()` refuses when ALREADY armed and caller didn't supply the
+        #   exact phrase — because in that state reset is the step that puts a
+        #   real-money-capable service back within one `start` of trading.
+        # When `armed_for_live_at` is null (testnet) reset needs no
+        # confirmation: clear from a transient upstream blip should not force
+        # an operator to retype the real-money incantation. Refusing from any
+        # other state (running, paused, idle) keeps `reset` a recovery verb,
+        # not a free teleport.
         with self._session_factory() as s:
             row = load_or_create(s)
             if row.status not in {"stopped", "error"}:
                 return {"ok": False, "error": "not_stopped"}
+            if row.armed_for_live_at is not None and confirm_text != _LIVE_CONFIRM:
+                return _live_confirm_refusal(row.armed_for_live_at, confirm_text)
             row.status = "idle"
             row.status_reason = None
             # Reset the consecutive LLM error counter on recovery so a fresh

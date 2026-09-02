@@ -243,12 +243,27 @@ def reset(body: _ConfirmBody | None = None) -> dict[str, Any]:
     """Reset the service to `idle`.
 
     Accepts from `stopped` or `error` only (the spec §3 recovery verbs).
-    `confirm_text` is accepted but not required — the arming gate is
-    enforced only on `start`; reset is a recovery action, not a new
-    arming. From any other state (idle, running, paused) returns 409.
+
+    Live-arming gate: when `armed_for_live_at` is set, `confirm_text` must
+    match `I UNDERSTAND REAL MONEY` exactly (same gate `start()` enforces
+    on first-time arming). When `armed_for_live_at` is null (testnet), no
+    confirmation is required — reset is just a recovery verb there.
+
+    Refusal responses use the same body shape as `start()`'s
+    `live_arming_required` refusal so one UI handler can serve both:
+      409 {"error": "live_arming_required",
+           "required_confirm_text": "I UNDERSTAND REAL MONEY"}.
     """
     confirm = body.confirm_text if body else None
     res = trader.reset(confirm_text=confirm)
+    if res.get("ok") is False and res.get("error") == "live_arming_required":
+        return JSONResponse(
+            status_code=409,
+            content={
+                "error": "live_arming_required",
+                "required_confirm_text": res["required_confirm_text"],
+            },
+        )
     if not res.get("ok"):
         raise HTTPException(status_code=409, detail=res.get("error"))
     return res
