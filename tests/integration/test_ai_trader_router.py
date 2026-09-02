@@ -383,3 +383,290 @@ def test_lifespan_malformed_settings_leaves_status_responding_unwired(
         assert data["wiring_ok"] is False
         assert data["broker_wired"] is False
         assert data["llm_wired"] is False
+
+
+# -- Task 12: control endpoints (start / pause / resume / emergency-stop / reset) + live-arming gate
+
+# Testnet-mode helper: the brief's two live-arming tests force live mode by
+# monkeypatching _is_live_mode in the service module. Every other Task 12
+# test pins _is_live_mode to False so they exercise testnet codepaths and
+# don't trip the arming gate accidentally.
+import app.services.ai_trader.service as _svc  # noqa: E402
+
+
+@pytest.fixture
+def _testnet_mode(monkeypatch):
+    monkeypatch.setattr(_svc, "_is_live_mode", lambda: False)
+
+
+def test_start_and_pause_round_trip(client, _testnet_mode):
+    assert client.post("/api/ai-trader/start").status_code == 200
+    r = client.post("/api/ai-trader/pause")
+    assert r.status_code == 200
+    r = client.get("/api/ai-trader/status")
+    assert r.json()["status"] == "paused"
+
+
+def test_resume_from_paused(client, _testnet_mode):
+    assert client.post("/api/ai-trader/start").status_code == 200
+    assert client.post("/api/ai-trader/pause").status_code == 200
+    assert client.post("/api/ai-trader/resume").status_code == 200
+    assert client.get("/api/ai-trader/status").json()["status"] == "running"
+
+
+def test_emergency_stop_lands_on_stopped(client, _testnet_mode):
+    assert client.post("/api/ai-trader/start").status_code == 200
+    assert client.post("/api/ai-trader/emergency-stop").status_code == 200
+    assert client.get("/api/ai-trader/status").json()["status"] == "stopped"
+
+
+def test_reset_returns_to_idle(client, _testnet_mode):
+    assert client.post("/api/ai-trader/start").status_code == 200
+    assert client.post("/api/ai-trader/emergency-stop").status_code == 200
+    r = client.post("/api/ai-trader/reset")
+    assert r.status_code == 200
+    assert client.get("/api/ai-trader/status").json()["status"] == "idle"
+
+
+def test_reset_without_stopped_or_error_is_409(client, _testnet_mode):
+    """reset() only accepts status ∈ {stopped, error}. From idle (the default
+    after setup_module) it must refuse with 409 not_stopped."""
+    r = client.post("/api/ai-trader/reset")
+    assert r.status_code == 409
+    assert r.json()["detail"] == "not_stopped"
+
+
+def test_reset_from_error_returns_to_idle(client, _testnet_mode):
+    """Task 10's tripwires can land the service in `error` after 5
+    consecutive LLM failures. Spec §3 says reset() must recover from error
+    as well as stopped; without this path error is unrecoverable except
+    by hand-editing the DB. Use the service API to enter error directly
+    (faster + deterministic than driving 5 ticks), then reset through the
+    HTTP surface."""
+    # Drive service into error via the low-level setter used by tripwires.
+    from app.services.ai_trader.service import trader as _trader
+    _trader._set_status("error", reason="consecutive_llm_errors:5")
+    assert client.get("/api/ai-trader/status").json()["status"] == "error"
+    r = client.post("/api/ai-trader/reset")
+    assert r.status_code == 200
+    assert client.get("/api/ai-trader/status").json()["status"] == "idle"
+
+
+def test_live_arming_requires_confirm(monkeypatch, client):
+    """Live mode + un-armed → start returns 409 with the required_confirm_text
+    payload so the UI can show the exact phrase the operator must type."""
+    monkeypatch.setattr(_svc, "_is_live_mode", lambda: True)
+    # Make sure no prior arming leaks across tests.
+    with SessionLocal() as s:
+        from app.models.ai_settings import load_or_create
+        row = load_or_create(s)
+        row.armed_for_live_at = None
+        s.commit()
+    r = client.post("/api/ai-trader/start")
+    assert r.status_code == 409
+    body = r.json()
+    assert body["error"] == "live_arming_required"
+    assert body["required_confirm_text"] == "I UNDERSTAND REAL MONEY"
+    # Status must NOT have flipped to running while arming was refused.
+    assert client.get("/api/ai-trader/status").json()["status"] != "running"
+
+
+def test_live_arming_with_confirm_succeeds(monkeypatch, client):
+    monkeypatch.setattr(_svc, "_is_live_mode", lambda: True)
+    with SessionLocal() as s:
+        from app.models.ai_settings import load_or_create
+        row = load_or_create(s)
+        row.armed_for_live_at = None
+        s.commit()
+    r = client.post(
+        "/api/ai-trader/start",
+        json={"confirm_text": "I UNDERSTAND REAL MONEY"},
+    )
+    assert r.status_code == 200
+    st = client.get("/api/ai-trader/status").json()
+    assert st["status"] == "running"
+    assert st["armed_for_live_at"] is not None, (
+        "armed_for_live_at must be persisted on first successful live arming"
+    )
+
+
+def test_live_arming_near_miss_rejected(monkeypatch, client):
+    """Exact-match gate: a near miss (wrong case, extra whitespace, trailing
+    punctuation) must be refused with 409 — not silently accepted."""
+    monkeypatch.setattr(_svc, "_is_live_mode", lambda: True)
+    with SessionLocal() as s:
+        from app.models.ai_settings import load_or_create
+        row = load_or_create(s)
+        row.armed_for_live_at = None
+        s.commit()
+    for near_miss in (
+        "i understand real money",        # wrong case
+        "I UNDERSTAND REAL MONEY ",       # trailing whitespace
+        "I UNDERSTAND REAL MONEY.",       # trailing punctuation
+        " I UNDERSTAND REAL MONEY",       # leading whitespace
+    ):
+        r = client.post(
+            "/api/ai-trader/start",
+            json={"confirm_text": near_miss},
+        )
+        assert r.status_code == 409, (
+            f"near-miss {near_miss!r} was accepted (got {r.status_code}); "
+            "exact-match is required"
+        )
+        assert r.json()["error"] == "live_arming_required"
+    # And after all the near-misses, armed_for_live_at must still be null.
+    st = client.get("/api/ai-trader/status").json()
+    assert st["armed_for_live_at"] is None
+
+
+def test_first_live_arming_lowers_caps_to_conservative_tier(monkeypatch, client):
+    """Per spec §11: first successful live arming downgrades the risk
+    defaults to per-order 20 USDT, daily loss -10 USDT, daily max trades 10."""
+    monkeypatch.setattr(_svc, "_is_live_mode", lambda: True)
+    with SessionLocal() as s:
+        from app.models.ai_settings import load_or_create
+        row = load_or_create(s)
+        row.armed_for_live_at = None
+        # Pre-seed testnet-tier values so we can see them get lowered.
+        row.max_order_quote_usdt = 50.0
+        row.daily_loss_cap_usdt = -30.0
+        row.daily_max_trades = 20
+        s.commit()
+    r = client.post(
+        "/api/ai-trader/start",
+        json={"confirm_text": "I UNDERSTAND REAL MONEY"},
+    )
+    assert r.status_code == 200
+    st = client.get("/api/ai-trader/status").json()
+    assert st["max_order_quote_usdt"] == 20.0
+    assert st["daily_loss_cap_usdt"] == -10.0
+    assert st["daily_max_trades"] == 10
+
+
+def test_settings_put_updates_caps(client, _testnet_mode):
+    r = client.put(
+        "/api/ai-trader/settings",
+        json={"max_order_quote_usdt": 25.0,
+              "max_position_per_symbol_usdt": 250.0,
+              "daily_loss_cap_usdt": -5.0,
+              "daily_max_trades": 8,
+              "symbols": ["BTCUSDT", "ETHUSDT"],
+              "poll_interval_sec": 30},
+    )
+    assert r.status_code == 200
+    st = client.get("/api/ai-trader/status").json()
+    assert st["max_order_quote_usdt"] == 25.0
+    assert st["max_position_per_symbol_usdt"] == 250.0
+    assert st["daily_loss_cap_usdt"] == -5.0
+    assert st["daily_max_trades"] == 8
+    assert st["symbols"] == ["BTCUSDT", "ETHUSDT"]
+    assert st["poll_interval_sec"] == 30
+
+
+def test_settings_put_rejects_invalid_caps(client, _testnet_mode):
+    """PUT /settings must refuse values that would defeat the guards.
+    Each rule fires independently and returns 422."""
+    # Per-order cap must be positive (otherwise the guard that uses it as
+    # an upper bound becomes useless).
+    r = client.put(
+        "/api/ai-trader/settings",
+        json={"max_order_quote_usdt": 0},
+    )
+    assert r.status_code == 422
+    r = client.put(
+        "/api/ai-trader/settings",
+        json={"max_order_quote_usdt": -1},
+    )
+    assert r.status_code == 422
+    # Per-symbol position cap must be positive for the same reason.
+    r = client.put(
+        "/api/ai-trader/settings",
+        json={"max_position_per_symbol_usdt": 0},
+    )
+    assert r.status_code == 422
+    # Daily loss cap is a negative number; a positive value inverts the guard
+    # (pnl_today > positive cap would trip on a winning day, or never trip
+    # on a losing day).
+    r = client.put(
+        "/api/ai-trader/settings",
+        json={"daily_loss_cap_usdt": 5.0},
+    )
+    assert r.status_code == 422
+    # Trade count must be >= 1.
+    r = client.put(
+        "/api/ai-trader/settings",
+        json={"daily_max_trades": 0},
+    )
+    assert r.status_code == 422
+    r = client.put(
+        "/api/ai-trader/settings",
+        json={"daily_max_trades": -3},
+    )
+    assert r.status_code == 422
+    # And no row was mutated by the rejected requests.
+    st = client.get("/api/ai-trader/status").json()
+    assert st["max_order_quote_usdt"] > 0
+    assert st["max_position_per_symbol_usdt"] > 0
+    assert st["daily_loss_cap_usdt"] < 0
+    assert st["daily_max_trades"] >= 1
+
+
+def test_emergency_stop_blocks_subsequent_tick(client, monkeypatch):
+    """After emergency-stop, status == "stopped" and tick() must not call
+    the LLM and must not place an order. Use a double that fails loudly if
+    invoked."""
+    import asyncio
+    from app.models.ai_decision import AIDecision
+
+    # The full suite runs many tests that leave AIDecision rows behind.
+    # Snapshot the count first and assert against the DELTA, not the
+    # absolute count — otherwise state from prior tests would mask a
+    # genuine regression where tick() writes rows after emergency-stop.
+    with SessionLocal() as s:
+        baseline = s.query(AIDecision).count()
+
+    class BoomLLM:
+        def __init__(self):
+            self.calls = 0
+        async def chat(self, *a, **k):
+            self.calls += 1
+            raise AssertionError("tick must not call LLM after emergency-stop")
+
+    class BoomBroker:
+        def __init__(self):
+            self.place_calls = 0
+        def get_klines(self, *a, **k):
+            return [[0, "60000", "60100", "59900", "60050", "10"]] * 5
+        def get_account_info(self):
+            return {"balances": []}
+        def get_open_orders(self, *a, **k):
+            return []
+        def place_order(self, *a, **k):
+            self.place_calls += 1
+            raise AssertionError("tick must not place an order after emergency-stop")
+
+    llm = BoomLLM()
+    broker = BoomBroker()
+    monkeypatch.setattr(_svc.trader, "llm", llm)
+    monkeypatch.setattr(_svc.trader, "broker", broker)
+    # Confirm wiring took.
+    assert _svc.trader.llm is llm
+    assert _svc.trader.broker is broker
+
+    # Start (testnet), then emergency-stop.
+    monkeypatch.setattr(_svc, "_is_live_mode", lambda: False)
+    assert client.post("/api/ai-trader/start").status_code == 200
+    assert client.post("/api/ai-trader/emergency-stop").status_code == 200
+    assert client.get("/api/ai-trader/status").json()["status"] == "stopped"
+
+    # Now drive a tick. Because status != "running", tick() must return
+    # BEFORE the LLM or broker is touched. Both doubles would raise if hit.
+    asyncio.run(_svc.trader.tick())
+    assert llm.calls == 0
+    assert broker.place_calls == 0
+    # No NEW decision rows either.
+    with SessionLocal() as s:
+        after = s.query(AIDecision).count()
+    assert after == baseline, (
+        f"tick after emergency-stop wrote {after - baseline} decision rows"
+    )

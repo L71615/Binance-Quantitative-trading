@@ -207,12 +207,23 @@ class AITraderService:
             s.commit()
 
     def reset(self, *, confirm_text: str | None = None) -> dict:
+        # Spec §3 state diagram: reset() recovers from BOTH stopped and error.
+        # Task 10's tripwires can land the service in `error` after 5
+        # consecutive LLM failures, and without accepting `error` here that
+        # state was only recoverable by hand-editing the database. `confirm_text`
+        # is accepted but not required: the brief's `POST /reset` body has
+        # `confirm_text?` (optional); the arming gate is enforced only on
+        # `start`. Refusing from any other state (running, paused, idle) keeps
+        # `reset` a recovery verb, not a free teleport.
         with self._session_factory() as s:
             row = load_or_create(s)
-            if row.status != "stopped":
+            if row.status not in {"stopped", "error"}:
                 return {"ok": False, "error": "not_stopped"}
             row.status = "idle"
             row.status_reason = None
+            # Reset the consecutive LLM error counter on recovery so a fresh
+            # error trip requires a new streak of 5.
+            row.consecutive_llm_errors = 0
             row.updated_at = datetime.now(UTC)
             s.commit()
         return {"ok": True, "status": "idle"}

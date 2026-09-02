@@ -1,13 +1,17 @@
 """REST endpoints for AI Trader. Spec §7.
 
 Read-only surface (Task 11): status, decisions, dry-run.
-Control endpoints (start/pause/resume/...) live in Task 12.
+Control endpoints (start/pause/resume/emergency-stop/reset, PUT /settings,
+live-arming gate) added in Task 12.
 """
 from __future__ import annotations
 
+from datetime import datetime, UTC
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.db import SessionLocal, get_session
@@ -120,3 +124,173 @@ async def dry_run(symbol: str) -> dict[str, Any]:
         "guard_verdict": guard_verdict,
         "error": None,
     }
+
+
+# --------------------------------------------------------------------------
+# Task 12: control endpoints + live-arming gate + PUT /settings
+# --------------------------------------------------------------------------
+
+
+class _ConfirmBody(BaseModel):
+    """Optional confirm_text body for start/reset.
+
+    The exact-match phrase is enforced in the service layer (`start` checks
+    `_LIVE_CONFIRM == confirm_text`); the router just forwards it.
+    """
+    confirm_text: str | None = None
+
+
+class _SettingsUpdate(BaseModel):
+    """PUT /settings request body.
+
+    All fields optional (None == leave unchanged). Field-level validators
+    refuse values that would defeat the guards — see the document-string
+    comments on each Field for the exact rule and the rationale.
+    """
+    max_order_quote_usdt: float | None = Field(
+        default=None,
+        gt=0,
+        description=(
+            "Per-order quote cap (USDT). Must be > 0 — the guard uses this as "
+            "an upper bound; zero or negative makes the guard tautologically "
+            "reject every order or accept unbounded ones."
+        ),
+    )
+    max_position_per_symbol_usdt: float | None = Field(
+        default=None,
+        gt=0,
+        description=(
+            "Per-symbol inventory cap (USDT). Must be > 0 for the same reason "
+            "as max_order_quote_usdt."
+        ),
+    )
+    daily_loss_cap_usdt: float | None = Field(
+        default=None,
+        lt=0,
+        description=(
+            "Realised daily loss cap (negative USDT). MUST be strictly < 0 — "
+            "a positive value inverts the daily_loss guard so it trips on "
+            "profitable days instead of losing ones."
+        ),
+    )
+    daily_max_trades: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Daily placed-trade cap. Must be >= 1 — zero or negative makes "
+            "the trade-count guard impossible to satisfy."
+        ),
+    )
+    symbols: list[str] | None = None
+    poll_interval_sec: int | None = Field(
+        default=None,
+        ge=1,
+        description="Tick interval in seconds. Must be >= 1 to avoid busy-looping.",
+    )
+
+
+@router.post("/start")
+async def start(body: _ConfirmBody | None = None):
+    """Start the tick loop.
+
+    If Binance testnet is False AND `armed_for_live_at` is null, refuses with
+    409 `live_arming_required` until the caller retries with the exact
+    confirmation string `I UNDERSTAND REAL MONEY`. The exact-match gate lives
+    in the service layer (`start()` compares `_LIVE_CONFIRM == confirm_text`);
+    no trimming, case-folding, or substring acceptance.
+    """
+    confirm = body.confirm_text if body else None
+    res = await trader.start(confirm_text=confirm)
+    if res.get("ok") is False and res.get("error") == "live_arming_required":
+        # Spec §7 mandates the exact body shape
+        # {"error":"live_arming_required",
+        #  "required_confirm_text":"I UNDERSTAND REAL MONEY"}.
+        # FastAPI's HTTPException wraps `detail` under {"detail": ...};
+        # return a JSONResponse directly so the UI sees the documented shape.
+        return JSONResponse(
+            status_code=409,
+            content={
+                "error": "live_arming_required",
+                "required_confirm_text": res["required_confirm_text"],
+            },
+        )
+    return res
+
+
+@router.post("/pause")
+def pause() -> dict[str, Any]:
+    trader.pause()
+    return {"ok": True, "status": trader.status()["status"]}
+
+
+@router.post("/resume")
+def resume() -> dict[str, Any]:
+    trader.resume()
+    return {"ok": True, "status": trader.status()["status"]}
+
+
+@router.post("/emergency-stop")
+def emergency_stop() -> dict[str, Any]:
+    trader.emergency_stop()
+    # Status is persisted on the singleton row by the service. Subsequent
+    # tick() observes status != "running" and returns before any LLM or
+    # broker call — the regression test exercises this directly.
+    return {"ok": True, "status": trader.status()["status"]}
+
+
+@router.post("/reset")
+def reset(body: _ConfirmBody | None = None) -> dict[str, Any]:
+    """Reset the service to `idle`.
+
+    Accepts from `stopped` or `error` only (the spec §3 recovery verbs).
+    `confirm_text` is accepted but not required — the arming gate is
+    enforced only on `start`; reset is a recovery action, not a new
+    arming. From any other state (idle, running, paused) returns 409.
+    """
+    confirm = body.confirm_text if body else None
+    res = trader.reset(confirm_text=confirm)
+    if not res.get("ok"):
+        raise HTTPException(status_code=409, detail=res.get("error"))
+    return res
+
+
+@router.put("/settings")
+def put_settings(body: _SettingsUpdate) -> dict[str, Any]:
+    """Persist user-editable risk caps + symbols + poll interval.
+
+    Validation rules (each fires independently and returns 422):
+      - max_order_quote_usdt > 0
+      - max_position_per_symbol_usdt > 0
+      - daily_loss_cap_usdt < 0 (negative; the guard fires when pnl_today
+        drops below this floor)
+      - daily_max_trades >= 1
+      - poll_interval_sec >= 1
+    Together these guarantee no PUT can disable a guard by inverting or
+    zero-ing its threshold. All fields optional (None == leave unchanged).
+    """
+    with SessionLocal() as s:
+        row = load_or_create(s)
+        if body.max_order_quote_usdt is not None:
+            row.max_order_quote_usdt = float(body.max_order_quote_usdt)
+        if body.max_position_per_symbol_usdt is not None:
+            row.max_position_per_symbol_usdt = float(body.max_position_per_symbol_usdt)
+        if body.daily_loss_cap_usdt is not None:
+            row.daily_loss_cap_usdt = float(body.daily_loss_cap_usdt)
+        if body.daily_max_trades is not None:
+            row.daily_max_trades = int(body.daily_max_trades)
+        if body.symbols is not None:
+            # Upper-case + dedupe + preserve caller order. Sorting would
+            # silently rewrite a UI-provided order, which is surprising.
+            seen: set[str] = set()
+            normalised: list[str] = []
+            for sym in body.symbols:
+                u = sym.upper()
+                if u not in seen:
+                    seen.add(u)
+                    normalised.append(u)
+            row.symbol_list = normalised
+        if body.poll_interval_sec is not None:
+            row.poll_interval_sec = int(body.poll_interval_sec)
+        row.updated_at = datetime.now(UTC)
+        s.commit()
+    return {"ok": True}
