@@ -4,6 +4,7 @@ from datetime import datetime, UTC
 import pytest
 
 from app.db import Base, SessionLocal, engine
+from app.models.grid import Grid, GridStatus
 from app.services.ai_trader.service import AITraderService
 
 
@@ -62,11 +63,18 @@ def _fresh_state():
     """Reset ai_decision rows + revert ai_settings to defaults (idle)."""
     with SessionLocal() as s:
         s.query(AIDecision).delete()
+        from app.models.order import Order
+        s.query(Order).delete()
         from app.models.ai_settings import AISettings, load_or_create
         row = load_or_create(s)
         row.status = "idle"
         row.status_reason = None
         row.last_tick_at = None
+        # Reset the LLM-error streak counter too — earlier tests in this
+        # module (e.g. test_five_consecutive_llm_errors_trip_to_error) leave
+        # the singleton at status=error with the counter pinned at 5, so a
+        # test that wants to observe a fresh streak must zero it explicitly.
+        row.consecutive_llm_errors = 0
         row.symbols = '["BTCUSDT"]'
         s.commit()
     yield
@@ -160,9 +168,14 @@ async def test_tick_marks_error_on_llm_exception(_fresh_state):
 
 
 class OrderCapturingBroker(FakeBroker):
-    def __init__(self):
+    def __init__(self, *, symbol_info: dict | None = None):
         super().__init__()
         self.placed = []
+        # Optional exchangeInfo stub for the precision-gate tests. When
+        # `None` the broker reports "no precision info" and the service
+        # passes values through unchanged — which is the right behaviour
+        # for the pre-fix tests that don't care about rounding.
+        self._symbol_info = symbol_info
 
     def place_order(self, symbol, side, type_, quantity, price=None, **kw):
         self.placed.append(
@@ -171,6 +184,11 @@ class OrderCapturingBroker(FakeBroker):
         )
         return {"orderId": 999, "status": "FILLED", "executedQty": str(quantity),
                 "price": str(price)}
+
+    def get_symbol_info(self, symbol):
+        if self._symbol_info is None:
+            return {}
+        return self._symbol_info
 
 
 @pytest.mark.asyncio
@@ -300,6 +318,156 @@ async def test_five_consecutive_llm_errors_trip_to_error(_fresh_state):
     assert "consecutive_llm_errors" in (st["status_reason"] or "")
 
 
+@pytest.mark.asyncio
+async def test_five_consecutive_parse_failures_trip_to_error(_fresh_state):
+    """Final fix wave — Fix 2: 5 consecutive parse failures trip to status=error.
+
+    Spec §5 ("解析失败或 HTTP 异常") lumps parse failures into the same
+    tripwire bucket as HTTP exceptions: the LLM is unreachable in both
+    senses. Before this fix the parse-failed branch passed `llm_error=False`
+    so only HTTP exceptions counted; a perpetually misbehaving model that
+    always returned un-parseable JSON would never trip. Asserting this
+    pins the design decision and prevents a future regression that quietly
+    reverts `llm_error=True` in this branch.
+    """
+    from app.services.ai_trader.service import AITraderService
+
+    # LLM that returns syntactically-broken payloads — the upstream is up,
+    # but every response is un-parseable.
+    class GarbageLLM:
+        async def chat(self, *a, **k):
+            return "not json at all"
+
+    s = AITraderService(llm=GarbageLLM(), broker=FakeBroker())
+    s._set_status("running")
+    for _ in range(5):
+        await s.tick()
+    st = s.status()
+    assert st["status"] == "error", (
+        f"parse failures must count toward the tripwire; got status={st['status']!r}"
+    )
+    assert "consecutive_llm_errors" in (st["status_reason"] or "")
+    # Audit invariant: every tick that actually ran (status==running at tick
+    # entry) wrote one no_trade row with error="parse_failed". Once the
+    # tripwire flips status to error, tick() short-circuits without writing
+    # — so we expect exactly as many rows as the streak that produced the
+    # trip, which is at least 5 (the test loop), and they all carry the
+    # parse_failed cause so the operator sees why each one was rejected.
+    with SessionLocal() as db:
+        rows = db.query(AIDecision).order_by(AIDecision.id).all()
+    assert len(rows) >= 5
+    assert all(r.outcome == "no_trade" for r in rows)
+    assert all((r.error or "") == "parse_failed" for r in rows)
+
+
+# -- Final fix wave — Fix 3: round qty/price to exchange precision -------
+
+
+def _btcusdt_precision(*, step: float, tick: float, min_notional: float) -> dict:
+    """Build the minimal Binance exchangeInfo fragment that
+    `AITraderService._apply_exchange_precision` consumes. Shape mirrors
+    `BinanceClient.get_symbol_info` (the response of /api/v3/exchangeInfo).
+    """
+    return {
+        "symbol": "BTCUSDT",
+        "filters": [
+            {"filterType": "LOT_SIZE", "stepSize": step},
+            {"filterType": "PRICE_FILTER", "tickSize": tick},
+            {"filterType": "MIN_NOTIONAL", "minNotional": min_notional},
+        ],
+    }
+
+
+@pytest.mark.asyncio
+async def test_tick_rounds_qty_and_price_to_exchange_precision(_fresh_state):
+    """LLM emits a qty and a price that violate LOT_SIZE / PRICE_FILTER.
+    The precision helper must round them BEFORE calling place_order so
+    Binance never sees a value it will reject with -1013 / -1019. Catches
+    a regression where _tick_symbol skipped the rounding path.
+    """
+    from app.services.ai_trader.service import AITraderService
+    from app.models.ai_settings import load_or_create
+
+    broker = OrderCapturingBroker(
+        symbol_info=_btcusdt_precision(
+            step=0.00001, tick=0.01, min_notional=10.0,
+        )
+    )
+    llm = FakeLLM([json.dumps(
+        # qty 0.0003333 isn't a multiple of 0.00001; price 60123.4567
+        # isn't a multiple of 0.01; notional >> min_notional so the
+        # MIN_NOTIONAL guard stays out of the way here.
+        {"action": "buy", "symbol": "BTCUSDT",
+         "qty": 0.0003333, "price": 60123.4567,
+         "reason": "raw LLM output, unrounded"})])
+    s = AITraderService(llm=llm, broker=broker)
+    s._set_status("running")
+    with SessionLocal() as db:
+        row = load_or_create(db)
+        row.max_order_quote_usdt = 1000.0
+        db.commit()
+    await s.tick()
+    # The broker received the ROUNDED ones, not the raw LLM ones.
+    assert len(broker.placed) == 1
+    placed = broker.placed[0]
+    assert placed["quantity"] == 0.00033  # floor(0.0003333 / 0.00001) * 0.00001
+    assert placed["price"] == 60123.46   # round(60123.4567 / 0.01) * 0.01
+    # And the audit row carries the rounded values too, so what the
+    # operator sees in /decisions matches what Binance saw.
+    with SessionLocal() as db:
+        rows = db.query(AIDecision).all()
+    assert len(rows) == 1
+    assert rows[0].outcome == "placed"
+    parsed_back = json.loads(rows[0].parsed)
+    assert parsed_back["qty"] == 0.00033
+    assert parsed_back["price"] == 60123.46
+
+
+@pytest.mark.asyncio
+async def test_tick_rejects_below_min_notional_without_calling_place_order(
+    _fresh_state,
+):
+    """When the rounded notional is below MIN_NOTIONAL, the tick must NOT
+    call place_order. It must write a `rejected` audit row carrying
+    `error="below_min_notional:<value>"` so the operator (and the LLM)
+    see why the order was skipped. Catches a regression that either
+    calls place_order with too-small values or fails to write the
+    audit row.
+    """
+    from app.services.ai_trader.service import AITraderService
+    from app.models.ai_settings import load_or_create
+
+    broker = OrderCapturingBroker(
+        symbol_info=_btcusdt_precision(
+            step=0.00001, tick=0.01, min_notional=10.0,
+        )
+    )
+    llm = FakeLLM([json.dumps(
+        # notional = 0.001 * 5000 = 5 USDT, well under 10 USDT MIN_NOTIONAL
+        {"action": "buy", "symbol": "BTCUSDT",
+         "qty": 0.001, "price": 5000.0,
+         "reason": "tiny order, will fail MIN_NOTIONAL"})])
+    s = AITraderService(llm=llm, broker=broker)
+    s._set_status("running")
+    with SessionLocal() as db:
+        row = load_or_create(db)
+        row.max_order_quote_usdt = 1000.0
+        db.commit()
+    await s.tick()
+    # Broker never saw this — precision gate rejected before place_order.
+    assert broker.placed == [], (
+        f"place_order was called despite sub-MIN_NOTIONAL notional: "
+        f"{broker.placed!r}"
+    )
+    with SessionLocal() as db:
+        rows = db.query(AIDecision).all()
+    assert len(rows) == 1
+    assert rows[0].outcome == "rejected"
+    assert (rows[0].error or "").startswith("below_min_notional:"), (
+        f"audit row must carry below_min_notional:<value>; got {rows[0].error!r}"
+    )
+
+
 # -- Task 11 fix pass 2: wiring setters preserve flag invariant ---------
 
 
@@ -423,3 +591,70 @@ def test_wiring_ok_cannot_be_forced_out_of_sync():
     assert st["wiring_ok"] is False
     assert st["broker_wired"] is False
     assert st["llm_wired"] is False
+
+
+# -- Final fix wave — Fix 1: Guard 6 wired to the Order table --------------
+#
+# Before this fix `AITraderService.__init__` defaulted `grid_has_open_orders`
+# to `lambda s: False`, so Guard 6 (`symbol_exclusive`) always passed and two
+# systems could stack positions on the same symbol. These two tests pin the
+# new default: the callback must return True when an open Order row exists
+# for the requested symbol, False otherwise, and the result must not leak
+# across symbols.
+
+
+def _seed_open_order(symbol: str) -> None:
+    """Insert one Grid + one Order(status=NEW) row for `symbol`.
+
+    `Order.grid_id` is `NOT NULL` and FK-constrained, so a parent Grid is
+    required. Both rows live just for the duration of the test; the
+    `_fresh_state` fixture tears them down.
+    """
+    from app.models.order import Order
+    with SessionLocal() as s:
+        g = Grid(
+            symbol=symbol, lower_price=1.0, upper_price=2.0, grid_count=3,
+            grid_mode="arithmetic", total_quote_amount=10.0,
+            status=GridStatus.RUNNING,
+            created_at=datetime.now(UTC),
+        )
+        s.add(g)
+        s.flush()
+        s.add(Order(
+            grid_id=g.id, binance_order_id=10_000 + abs(hash(symbol)) % 1_000_000,
+            symbol=symbol, side="BUY", type="LIMIT", price=1.5, qty=0.001,
+            filled_qty=0.0, status="NEW",
+            created_at=datetime.now(UTC), updated_at=datetime.now(UTC),
+        ))
+        s.commit()
+
+
+def test_grid_has_open_orders_true_when_new_order_exists(_fresh_state):
+    """Guard 6 callback must return True when an Order(status=NEW) row exists
+    for the symbol. Regression-protects the wiring of the Order table.
+    """
+    from app.services.ai_trader.service import AITraderService
+    _seed_open_order("BTCUSDT")
+    s = AITraderService()
+    assert s.grid_has_open_orders("BTCUSDT") is True
+
+
+def test_grid_has_open_orders_false_when_no_orders_and_no_symbol_leak(
+    _fresh_state,
+):
+    """Guard 6 callback must return False when no orders exist for the
+    symbol, and True for one symbol must not leak to another.
+    """
+    from app.services.ai_trader.service import AITraderService
+    # No orders at all → False.
+    s = AITraderService()
+    assert s.grid_has_open_orders("BTCUSDT") is False
+    assert s.grid_has_open_orders("ETHUSDT") is False
+    # Seed BTCUSDT only, then ask about ETHUSDT — must stay False.
+    _seed_open_order("BTCUSDT")
+    assert s.grid_has_open_orders("BTCUSDT") is True
+    assert s.grid_has_open_orders("ETHUSDT") is False, (
+        "Guard 6 callback must filter by symbol; the 'any open order means "
+        "every symbol is blocked' bug would leak BTCUSDT's open order onto "
+        "ETHUSDT and silently disable half the AI Trader's universe"
+    )

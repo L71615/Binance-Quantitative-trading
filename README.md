@@ -160,6 +160,8 @@ Inside `app/services/ai_trader/guards.py::run_all`, each tick evaluates:
 | 2 | `per_order_cap` | `qty * price ≤ max_order_quote_usdt` (holds skipped) |
 | 3 | `position_cap` | current base × price + buy notional ≤ `max_position_per_symbol_usdt` (sells always pass) |
 | 4 | `daily_loss_cap` | `pnl_today ≥ daily_loss_cap_usdt` — fire routes status to `paused` |
+
+Note on `pnl_today` in `/api/ai-trader/status`: it is a cash-flow proxy (revenue of today's `placed` sells minus cost of today's `placed` buys), not realised net P&L — commissions (Binance spot taker ~0.1%) are not subtracted, and cost is the order's price rather than the eventual fill average — so the response carries `pnl_basis: "cash_flow_unadjusted_for_fees"` to make that explicit.
 | 5 | `daily_trade_cap` | `trades_today < daily_max_trades` — fire routes status to `paused` |
 | 6 | `symbol_exclusive` | no open GridTrader orders for this symbol — keeps AI Trader and GridTrader from stacking on the same pair |
 

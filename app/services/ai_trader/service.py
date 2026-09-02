@@ -10,6 +10,39 @@ from typing import Any, Callable
 from app.db import SessionLocal
 from app.models.ai_settings import AISettings, load_or_create
 
+# The Order table is the system of record for any order the GridTrader
+# leaves resting on the exchange (see `app/api/routers/dashboard.py` which
+# already reports `status in ("NEW", "PARTIALLY_FILLED")` as the canonical
+# open-orders signal). Guard 6 (`symbol_exclusive`) reads from this table so
+# the AI Trader refuses to add exposure to a symbol the grid is currently
+# holding. The literal "NEW" is the right value because `Order.status` is a
+# plain `String` column (not a Python enum) whose default IS the string
+# `"NEW"`. We intentionally keep the string literal here rather than
+# importing an enum — the column type does not warrant one, and the comment
+# above pins the choice so a future enum-introduction will not silently
+# change Guard 6's semantics.
+_OPEN_ORDER_STATUS = "NEW"
+
+
+def _default_grid_has_open_orders(symbol: str) -> bool:
+    """Production default for Guard 6 (`symbol_exclusive`).
+
+    Opens a short-lived session and asks the Order table whether any row
+    exists for this symbol still resting on the exchange. `first()` short
+    circuits as soon as a single row is found, so this stays O(1) over the
+    common case. We don't cache across calls — placing one Order query per
+    guard invocation is cheaper than the complexity of staleness, and the
+    guard runs at most once per symbol per tick.
+    """
+    from app.models.order import Order
+    with SessionLocal() as s:
+        return (
+            s.query(Order)
+            .filter(Order.symbol == symbol, Order.status == _OPEN_ORDER_STATUS)
+            .first()
+            is not None
+        )
+
 
 _LIVE_CONFIRM = "I UNDERSTAND REAL MONEY"
 
@@ -51,7 +84,11 @@ class AITraderService:
         self.llm = llm
         self.broker = broker
         self._session_factory = db_session_factory or SessionLocal
-        self.grid_has_open_orders = grid_has_open_orders or (lambda s: False)
+        # Default Guard 6 callback queries the Order table for any open
+        # order on this symbol. Tests still inject fakes via this ctor.
+        self.grid_has_open_orders = (
+            grid_has_open_orders or _default_grid_has_open_orders
+        )
 
     # ---- wiring -------------------------------------------------------
     # Observability for the read-only /status surface. A failed or absent
@@ -153,6 +190,13 @@ class AITraderService:
             ),
             # Today's counters — same formula as the guards enforce.
             "pnl_today": pnl_today,
+            # The counter is a CASH-FLOW proxy, not realised P&L: it sums
+            # revenue(sells) - cost(buys) over today's `placed` rows and
+            # does not subtract commissions (Binance spot taker ~0.1%) and
+            # uses the order's price, not the eventual fill average. The
+            # `pnl_basis` field pins the basis so a downstream reader can
+            # not silently treat this as net realised P&L.
+            "pnl_basis": "cash_flow_unadjusted_for_fees",
             "trades_today": trades_today,
             "loss_budget_remaining_usdt": loss_budget_remaining,
             # Observability of broker/LLM wiring. Always present.
@@ -336,9 +380,14 @@ class AITraderService:
                 outcome="no_trade",
                 error="parse_failed",
             )
+            # Spec §5 ("解析失败或 HTTP 异常") counts parse failures toward the
+            # consecutive LLM-error tripwire the same way an HTTP exception
+            # does. The audit row above still carries outcome="no_trade" and
+            # error="parse_failed" so operators see the cause — what changes
+            # here is only whether the tripwire sees this as an LLM error.
             self._maybe_trip_after_tick(
                 guard_results_json=guard_results_json,
-                llm_error=False,
+                llm_error=True,
             )
             return
 
@@ -398,12 +447,45 @@ class AITraderService:
             return
 
         try:
+            # Exchange precision gate: LLM emits qty/price as floats, Binance
+            # rejects values that violate LOT_SIZE / PRICE_FILTER / MIN_NOTIONAL
+            # with -1013 / -1019 / -1016. Without rounding the LLM has no way to
+            # learn it produced a bad value (the broker raises and the audit
+            # row says "place_failed:..." but the operator still has to debug
+            # it by hand). Round before we send, reject sub-MIN_NOTIONAL
+            # without ever calling place_order, and persist the ROUNDED values
+            # so what the operator sees in the audit row matches what Binance
+            # actually saw.
+            qty_raw = float(parsed["qty"])
+            price_raw = float(parsed["price"])
+            rounded = self._apply_exchange_precision(symbol, qty_raw, price_raw)
+            if rounded is None:
+                self._write_decision(
+                    symbol=symbol,
+                    market_snapshot=market_json,
+                    prompt=prompt_text,
+                    raw_response=raw[:4000],
+                    parsed=json.dumps(parsed),
+                    action=parsed["action"],
+                    guard_results=guard_results_json,
+                    outcome="rejected",
+                    error=(
+                        f"below_min_notional:"
+                        f"{qty_raw * price_raw:.8f}"
+                    ),
+                )
+                self._maybe_trip_after_tick(
+                    guard_results_json=guard_results_json,
+                    llm_error=False,
+                )
+                return
+            qty, price = rounded
             order = self.broker.place_order(
                 symbol=symbol,
                 side=parsed["action"],
                 type_="limit",
-                quantity=parsed["qty"],
-                price=parsed["price"],
+                quantity=qty,
+                price=price,
             )
         except Exception as e:
             self._write_decision(
@@ -428,7 +510,11 @@ class AITraderService:
             market_snapshot=market_json,
             prompt=prompt_text,
             raw_response=raw[:4000],
-            parsed=json.dumps(parsed),
+            # Persist the rounded values, not the raw LLM values, so the
+            # operator's view of the order matches Binance's.
+            parsed=json.dumps(
+                {**parsed, "qty": qty, "price": price}
+            ),
             action=parsed["action"],
             guard_results=guard_results_json,
             outcome="placed",
@@ -487,6 +573,80 @@ class AITraderService:
                 row.status_reason = reason
             row.updated_at = datetime.now(UTC)
             s.commit()
+
+    def _apply_exchange_precision(
+        self, symbol: str, qty: float, price: float,
+    ) -> tuple[float, float] | None:
+        """Round `qty` / `price` to the exchange's LOT_SIZE / PRICE_FILTER
+        step, then enforce MIN_NOTIONAL.
+
+        Returns the (rounded_qty, rounded_price) tuple to feed into
+        `place_order`, or None if the resulting notional is below
+        `MIN_NOTIONAL` (in which case the caller must write a `rejected`
+        audit row and skip `place_order`).
+
+        If the broker doesn't expose `get_symbol_info` (e.g. lightweight
+        test fakes), we trust the input and return it as-is. BinanceClient
+        does, and `BinanceClient.get_symbol_info` already hits
+        `/api/v3/exchangeInfo`. The dry-run path never reaches here — its
+        broker stub has no place_order to invoke.
+        """
+        get_info = getattr(self.broker, "get_symbol_info", None)
+        if get_info is None:
+            # No precision info available — pass through. The per-order cap
+            # guard has already bounded the notional, and tests inject fakes
+            # here on purpose to keep this code unit-testable without a
+            # network round-trip.
+            return qty, price
+        info = get_info(symbol)
+        step = self._filter_step(info, "LOT_SIZE", "stepSize")
+        tick = self._filter_step(info, "PRICE_FILTER", "tickSize")
+        min_notional = self._filter_step(info, "MIN_NOTIONAL", "minNotional")
+        qty_r = _round_down_to_step(qty, step)
+        price_r = _round_to_step(price, tick)
+        if min_notional and qty_r * price_r < min_notional:
+            return None
+        return qty_r, price_r
+
+    @staticmethod
+    def _filter_step(info: Any, filter_type: str, field: str) -> float:
+        """Pull a step/tick/min value out of Binance's `exchangeInfo.symbols`
+        structure. Returns 0 when the filter is absent — meaning "no
+        constraint" — so the caller can apply its own guard.
+        """
+        try:
+            for f in info.get("filters", []):
+                if f.get("filterType") == filter_type:
+                    val = float(f.get(field, 0) or 0)
+                    return val
+        except (AttributeError, TypeError, ValueError):
+            return 0.0
+        return 0.0
+
+
+def _round_down_to_step(value: float, step: float) -> float:
+    """Round `value` DOWN to the nearest multiple of `step`.
+
+    Down-rounding qty matters: rounding up could oversize the order and
+    breach the per-order cap or the per-symbol position cap. Binance's
+    LOT_SIZE rejects the next-larger-up multiple with -1013.
+    """
+    if step <= 0:
+        return value
+    n = int(value / step)
+    return round(n * step, 12)
+
+
+def _round_to_step(value: float, step: float) -> float:
+    """Round `value` to the nearest multiple of `step` (any direction).
+
+    PRICE_FILTER's tickSize is a presentation constraint, not a direction
+    constraint — round-half-to-nearest is fine. We deliberately do NOT
+    floor or ceil here.
+    """
+    if step <= 0:
+        return value
+    return round(round(value / step) * step, 12)
 
 
 # Singleton used by the FastAPI router and by the lifespan loop.
