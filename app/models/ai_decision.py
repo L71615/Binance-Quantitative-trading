@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from datetime import datetime, UTC
 
-from sqlalchemy import DateTime, Float, Integer, String, Text
+from sqlalchemy import Boolean, DateTime, Float, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
@@ -29,3 +29,18 @@ class AIDecision(Base):
     filled_qty: Mapped[float | None] = mapped_column(Float, nullable=True)
     filled_price: Mapped[float | None] = mapped_column(Float, nullable=True)
     error: Mapped[str | None] = mapped_column(String, nullable=True)
+    # `is_paper` partitions paper-trading audit rows from live. Required so the
+    # daily-loss / daily-trades counters in `_compute_today_counters` (which
+    # query this table) do not bleed paper P&L into the live guard budget —
+    # paper losses must never trip the live daily_loss_cap. Indexed because
+    # every tick's counter query filters by it. Default False keeps live
+    # rows (the historical majority) out of any future paper-only scan.
+    # SQLAlchemy maps Boolean to INTEGER on SQLite (0/1), which is what the
+    # ALTER TABLE migration below also produces, so reads stay consistent.
+    is_paper: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        nullable=False,
+        index=True,
+        server_default="0",
+    )

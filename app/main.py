@@ -35,6 +35,13 @@ from app.ws.realtime import manager
 async def lifespan(app: FastAPI):
     DATA_DIR = Path(__file__).resolve().parent.parent / "data"
     DATA_DIR.mkdir(exist_ok=True)
+    # Migrations run BEFORE create_all so existing installs (with no alembic)
+    # pick up new columns. Each migration is idempotent — re-running on an
+    # already-migrated DB is a no-op via PRAGMA table_info checks. New
+    # installs also work: create_all creates the column from the model
+    # definition, and the migration's PRAGMA check sees it already present.
+    from app.migrations import run_all_migrations
+    run_all_migrations(engine)
     Base.metadata.create_all(engine)
     await lifecycle.start()
     # Wire the AI Trader singleton with a live BinanceClient and a live

@@ -80,9 +80,15 @@ class AITraderService:
         broker: Any | None = None,
         db_session_factory: Callable | None = None,
         grid_has_open_orders: Callable[[str], bool] | None = None,
+        is_paper: bool = False,
     ):
         self.llm = llm
         self.broker = broker
+        # `is_paper` partitions paper-trading audit rows from live. Required
+        # so daily-loss / daily-trades counters do not bleed paper P&L into
+        # the live guard budget. Default False (live); main.py flips this when
+        # the user opts into paper mode. See CEO plan OV-C.
+        self.is_paper = is_paper
         self._session_factory = db_session_factory or SessionLocal
         # Default Guard 6 callback queries the Order table for any open
         # order on this symbol. Tests still inject fakes via this ctor.
@@ -141,6 +147,10 @@ class AITraderService:
         """Compute today's realised pnl and placed-trade count.
 
         Single source of truth: both `_tick_symbol` and `status()` call this.
+
+        Filters by `self.is_paper` so paper-trading rows never feed the live
+        daily counters. Without this, paper losses would silently trip the
+        live `daily_loss_cap` guard (CEO plan OV-C).
         """
         from app.models.ai_decision import AIDecision
         with self._session_factory() as s:
@@ -149,7 +159,10 @@ class AITraderService:
             )
             today_rows = (
                 s.query(AIDecision)
-                .filter(AIDecision.ts >= today_start)
+                .filter(
+                    AIDecision.ts >= today_start,
+                    AIDecision.is_paper == self.is_paper,
+                )
                 .all()
             )
         # Today's realised pnl = revenue (sells) - cost (buys).
@@ -529,6 +542,10 @@ class AITraderService:
         )
 
     def _write_decision(self, **kw) -> None:
+        # Stamp is_paper from the service instance so call sites don't need to
+        # remember to pass it. CEO plan OV-C: paper P&L must be partitioned
+        # from live at the audit-row level so the daily counters stay clean.
+        kw.setdefault("is_paper", self.is_paper)
         from app.models.ai_decision import AIDecision
         with self._session_factory() as s:
             s.add(AIDecision(**kw))
