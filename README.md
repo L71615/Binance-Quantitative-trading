@@ -60,7 +60,6 @@ A full-stack quantitative-trading workbench that runs entirely on your machine. 
 - [Emergency Stop & Recovery](#emergency-stop-and-recovery)
 - [Six Risk Guards](#six-hard-risk-guards-run-in-order-short-circuit-at-first-failure)
 - [Credential Storage](#credential-storage)
-- [Reference Projects](#reference-projects)
 - [License](#license)
 
 ## Quick start (Windows)
@@ -81,10 +80,6 @@ venv\Scripts\activate
 pip install -r requirements.txt
 pytest -q
 ```
-
-## Reference projects
-
-The `借鉴/` directory contains 9 open-source projects used as reference. See `借鉴/<repo>/_LICENSE_NOTES.md` for license details per project.
 
 ## AI Trader
 
@@ -243,7 +238,7 @@ Precedence on lookup (`app/main.py` lifespan): keyring first, then `app.config` 
 
 ## License
 
-MIT — see `LICENSE`. The bundled `借鉴/` reference projects retain their original licenses; consult each subfolder before redistribution.
+MIT — see `LICENSE`.
 
 ## ⚠️ Disclaimer
 
