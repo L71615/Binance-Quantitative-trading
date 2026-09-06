@@ -35,6 +35,12 @@ from app.ws.realtime import manager
 async def lifespan(app: FastAPI):
     DATA_DIR = Path(__file__).resolve().parent.parent / "data"
     DATA_DIR.mkdir(exist_ok=True)
+    # Configure JSON logging before anything else so even the migration /
+    # create_all / wiring exceptions below land as structured records.
+    # CEO plan F8: every line carries trace_id so 3-weeks-later debugging
+    # is one grep away.
+    from app.logging_config import configure_logging
+    configure_logging()
     # Migrations run BEFORE create_all so existing installs (with no alembic)
     # pick up new columns. Each migration is idempotent — re-running on an
     # already-migrated DB is a no-op via PRAGMA table_info checks. New

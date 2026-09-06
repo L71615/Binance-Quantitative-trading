@@ -4,11 +4,20 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import logging
 from datetime import datetime, UTC
 from typing import Any, Callable
 
 from app.db import SessionLocal
 from app.models.ai_settings import AISettings, load_or_create
+
+
+def _get_logger() -> logging.Logger:
+    """Lazy logger accessor. Importing logging at module top is fine, but
+    the test suite disables propagation before this module loads in some
+    paths — going through getLogger each call ensures we get the live
+    configured root logger."""
+    return logging.getLogger("app.ai_trader")
 
 # The Order table is the system of record for any order the GridTrader
 # leaves resting on the exchange (see `app/api/routers/dashboard.py` which
@@ -317,26 +326,51 @@ class AITraderService:
     # ---- tick loop (Task 8: context -> prompt -> llm -> parser -> guards -> audit) ----
     async def tick(self) -> None:
         from app.services.ai_trader import context, guards, parser, prompt
+        from app.trace import bind_trace
 
-        with self._session_factory() as s:
-            row = load_or_create(s)
-            if row.status != "running":
-                return
-            symbols = list(row.symbol_list)
-            row.last_tick_at = datetime.now(UTC)
-            row.updated_at = datetime.now(UTC)
-            s.commit()
+        # Bind a trace_id for the entire tick so every log line / audit row
+        # / guard decision can be reconstructed later by grepping one id.
+        # contextvar ensures asyncio.create_task children inherit it.
+        with bind_trace() as trace_id:
+            logger = _get_logger()
+            logger.info("tick.start", extra={"is_paper": self.is_paper})
 
-        # Snapshot of today's outcome stats — used by guards 4/5.
-        # Single source of truth; /status uses the same helper.
-        pnl_today, trades_today = self._compute_today_counters()
+            with self._session_factory() as s:
+                row = load_or_create(s)
+                if row.status != "running":
+                    logger.info("tick.skip status=%s", row.status,
+                                extra={"status": row.status})
+                    return
+                symbols = list(row.symbol_list)
+                row.last_tick_at = datetime.now(UTC)
+                row.updated_at = datetime.now(UTC)
+                s.commit()
 
-        for symbol in symbols:
-            await self._tick_symbol(
-                symbol,
-                pnl_today=pnl_today,
-                trades_today=trades_today,
-            )
+            logger.info("tick.symbols", extra={"symbols": symbols,
+                                               "count": len(symbols)})
+
+            # Snapshot of today's outcome stats — used by guards 4/5.
+            # Single source of truth; /status uses the same helper.
+            pnl_today, trades_today = self._compute_today_counters()
+
+            for symbol in symbols:
+                try:
+                    await self._tick_symbol(
+                        symbol,
+                        pnl_today=pnl_today,
+                        trades_today=trades_today,
+                    )
+                except Exception:
+                    # One symbol's tick must not stop the others. tick()
+                    # is wrapped in scheduler-side recovery too, but we
+                    # also catch here so a bug in one symbol doesn't take
+                    # out the rest of the poll batch.
+                    logger.exception("tick.symbol_failed",
+                                     extra={"symbol": symbol})
+
+            logger.info("tick.end", extra={"pnl_today": pnl_today,
+                                           "trades_today": trades_today,
+                                           "trace_id": trace_id})
 
     async def _tick_symbol(
         self, symbol: str, *, pnl_today: float, trades_today: int
