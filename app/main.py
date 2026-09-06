@@ -131,8 +131,21 @@ async def lifespan(app: FastAPI):
             _ai_trader.set_llm(None)
         except Exception:
             pass
-    yield
-    await lifecycle.stop()
+
+    # Background tick scheduler (F1.5 / P0-2). Started regardless of wiring
+    # state — when status != "running" the scheduler is a no-op that polls
+    # status every second. When the user flips status to "running" via
+    # /api/ai-trader/start, the next 1s wakeup starts ticking immediately.
+    # This makes 24h autonomous operation actually autonomous.
+    from app.services.ai_trader.scheduler import make_scheduler
+    from app.services.ai_trader.service import trader as _ai_trader_for_sched
+    _scheduler = make_scheduler(_ai_trader_for_sched)
+    _scheduler.start()
+    try:
+        yield
+    finally:
+        await _scheduler.stop()
+        await lifecycle.stop()
 
 
 app = FastAPI(lifespan=lifespan, title="Binance Spot Grid Bot")
