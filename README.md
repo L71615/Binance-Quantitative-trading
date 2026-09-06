@@ -1,78 +1,88 @@
-# Binance Spot Grid Trading Platform
+# Binance Spot Grid + AI-Trader Platform
 
-> Local-only automated grid trading bot for **Binance Spot (no leverage)** with an optional **AI-Trader** layer driven by any OpenAI-compatible LLM. Designed for learning and personal use, with a **4-phase testnet → live rollout** and **six hard risk guards**.
+> Local-only automated trading bot for **Binance Spot (no leverage)**. Classical grid engine plus an **AI-Trader** layer driven by any OpenAI-compatible LLM, designed to run **24/7 unattended** with strict risk discipline. Built as both a usable personal tool and a demoable platform for quant-system interviews.
 
 [![Python](https://img.shields.io/badge/Python-3.11%2B-blue?logo=python&logoColor=white)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
 [![SQLite](https://img.shields.io/badge/SQLite-encrypted-003B57?logo=sqlite&logoColor=white)](https://www.sqlite.org/)
 [![Frontend](https://img.shields.io/badge/Frontend-Vite%20%2B%20TS%20%2B%20Tailwind-646CFF?logo=vite&logoColor=white)](https://vitejs.dev/)
-[![Tests](https://img.shields.io/badge/Tests-129%20passing-brightgreen?logo=pytest&logoColor=white)](#testing)
+[![Tests](https://img.shields.io/badge/Tests-193%20passing-brightgreen?logo=pytest&logoColor=white)](#testing)
 [![License](https://img.shields.io/badge/License-MIT-lightgrey)](#license)
 [![Exchange](https://img.shields.io/badge/Exchange-Binance%20Spot-F0B90B?logo=binance&logoColor=white)](https://www.binance.com/)
 
-A full-stack quantitative-trading workbench that runs entirely on your machine. The classical **grid engine** posts bids/asks across a price band and profits from oscillation; on top of it sits an **AI-Trader** service that polls an LLM each tick, asks for `buy / sell / hold`, and runs the response through **six sequential risk guards** before any order is placed. Live trading is opt-in, gated by a typed confirmation phrase, and starts at deliberately conservative position caps.
+A full-stack quantitative-trading workbench that runs entirely on your machine. A **classical grid engine** posts bids/asks across a price band and profits from oscillation; on top of it sits an **AI-Trader** service that polls an LLM each tick, asks for `buy / sell / hold`, and runs the response through **six sequential risk guards** before any order is placed. Live trading is opt-in, gated by a typed confirmation phrase, and starts at deliberately conservative caps. Replayable backtests emit a static HTML report you can hand a recruiter without a build step.
 
-## ✨ Features
+## ✨ What's shipped
 
-- **Grid Engine** — classic spot grid with lifecycle, persistence to the `Order` table, and WebSocket-driven market data.
-- **AI-Trader** — OpenAI-compatible LLM client (DeepSeek / OpenAI / Moonshot / …) with prompt building, JSON parser, and 6 hard guards.
-- **Risk Guards** (`run_all`, short-circuit on first failure): `schema_valid` → `per_order_cap` → `position_cap` → `daily_loss_cap` → `daily_trade_cap` → `symbol_exclusive`.
-- **4-Phase Rollout** — Testnet (default) → Live-demo (conservative caps) → Live-full (normal caps). Flipping `testnet=false` alone **does not** arm live trading — a separate typed confirmation is required.
-- **State Machine** — `idle → running → {paused | stopped | error}` with `POST /pause`, `/resume`, `/emergency-stop`, `/reset`.
-- **Encrypted Credentials** — API keys live in the **OS keyring** (Windows Credential Manager), never in `.env`, logs, or commits.
-- **Setup Wizard** — first-run flow that verifies the broker connection before letting the bot touch anything.
-- **Web Dashboard** — Vite + TypeScript + Tailwind UI at `http://localhost:5173`.
+| Area | What it does | Tests |
+|---|---|---|
+| **Grid Engine** | Classic spot grid with lifecycle, persistence to the `Order` table, WebSocket-driven market data | covered by service integration tests |
+| **AI-Trader** | LLM-driven decisions, 6 hard risk guards, 4-phase live rollout (`testnet → live demo → live full`) | `tests/integration/test_ai_trader_*.py` |
+| **Paper/Live isolation** (P0-1) | `AIDecision.is_paper` column partitions paper P&L from the live daily counters — paper losses cannot trip the live `daily_loss_cap` | `tests/integration/test_paper_live_isolation.py` |
+| **Background scheduler** (P0-2) | `AITraderScheduler` drives `tick()` at `poll_interval_sec` with a 30s per-tick timeout, exception-tolerant, cleanly stoppable | `tests/integration/test_ai_trader_scheduler.py` |
+| **Structured logs + trace_id** (P0-3) | Every log line is single-line JSON with `ts / level / logger / message / trace_id`. Each tick binds a fresh id so a bug reported weeks later is `grep trace_id=<id>` away | `tests/unit/test_trace_and_logging.py` |
+| **FallbackLLM** (P0-4) | Multi-provider LLM chain. Trips to next provider on HTTP error / empty response / parse failure (model degradation included). Active provider visible via `/status` | `tests/unit/test_fallback_llm.py` |
+| **Windows Service wrapper** (P0-4) | `scripts/windows_service.py` runs uvicorn as a supervised subprocess under the SCM, auto-restart on crash, terminate-then-kill on stop | `tests/unit/test_windows_service.py` |
+| **Backtest engine** (P0-5) | `ReplayLLM` replays stored `AIDecision.raw_response` at zero LLM cost. `HistoricalBroker` answers the Broker interface from frozen K-lines + a virtual ledger. Runner emits a framework-free HTML report to `docs/backtests/` | `tests/unit/test_backtest.py` |
 
 ## 🧱 Architecture
 
 ```
 ┌────────────────────────────────────────────────────────────────────┐
-│                         Frontend (Vite + TS)                       │
+│                          FastAPI + Vite/TS                         │
 │   Dashboard  ·  Grids  ·  Orders  ·  AI Trader  ·  Settings        │
 └────────────────────────────┬───────────────────────────────────────┘
-                             │  REST + WebSocket
+                             │  REST + WebSocket + Bearer token
 ┌────────────────────────────▼───────────────────────────────────────┐
-│                          FastAPI backend                           │
-│  routers/  →  services/  →  broker/binance.py  →  SQLite (app.db)  │
-│                                                                    │
-│  ┌──────────────┐    every 60s    ┌────────────────────────────┐   │
-│  │ AI Trader    │ ──────────────► │  6 Guards (short-circuit)  │   │
-│  │ service.py   │ ◄────────────── │  → buy / sell / hold       │   │
-│  └──────────────┘   parsed JSON   └────────────────────────────┘   │
-│                                                                    │
-│  ┌──────────────┐                                                  │
-│  │ Grid Engine  │  posts limit orders across the price band       │
-│  └──────────────┘                                                  │
+│                       AITraderScheduler  (P0-2)                    │
+│   polls tick() at poll_interval_sec · 30s timeout · recovers      │
+└────────────────────────────┬───────────────────────────────────────┘
+                             │
+┌────────────────────────────▼───────────────────────────────────────┐
+│                  Singleton: AITraderService                       │
+│   state machine: idle ──start──▶ running ──trip──▶ paused/error   │
+│                       ◀──reset── stopped    ◀──emergency_stop──   │
+│                                                                     │
+│   tick(symbols):  ┌─────────────────────────────────────────────┐ │
+│   trace_id bound  │ context.gather (4 fields) ─▶ prompt          │ │
+│                   │         │                       │            │ │
+│                   │         ▼                       ▼            │ │
+│                   │   price + klines +      system + user msgs   │ │
+│                   │   balances + orders                           │ │
+│                   └─────────┬────────────────────────────────────┘ │
+│                             ▼                                     │
+│       FallbackLLM.chat (P0-4) ─▶ parser ─▶ guards.run_all() ─▶ ... │
+│       [primary]─fallback─[secondary]─...   6 sequential guards     │
+│       trips on HTTP / empty / parse failure                       │
 └────────────────────────────────────────────────────────────────────┘
                              │
                              ▼
                     Binance Spot API (no leverage)
 ```
 
-## 📑 Table of Contents
+Risk guards in order (`app/services/ai_trader/guards.py::run_all`, short-circuit on first failure):
+1. `schema_valid` — action ∈ {buy, sell, hold}, types sane
+2. `per_order_cap` — `qty * price ≤ max_order_quote_usdt`
+3. `position_cap` — current base × price + buy notional ≤ `max_position_per_symbol_usdt`
+4. `daily_loss_cap` — `pnl_today ≥ daily_loss_cap_usdt` (routes status to `paused`)
+5. `daily_trade_cap` — `trades_today < daily_max_trades` (routes status to `paused`)
+6. `symbol_exclusive` — no open GridTrader orders for this symbol (prevents stacking)
 
-- [Quick Start](#quick-start-windows)
-- [Configuration](#configuration)
-- [Testing](#testing)
-- [Architecture & Layout](#architecture)
-- [AI Trader — Cold-Start](#ai-trader)
-- [Testnet → Live Rollout](#enabling-on-testnet-recommended-first) · [Phase 2 Live-demo](#phase-2--live-demo-conservative-tier) · [Phase 3 Live-full](#phase-3--live-full-raise-caps-to-normal-tier)
-- [Emergency Stop & Recovery](#emergency-stop-and-recovery)
-- [Six Risk Guards](#six-hard-risk-guards-run-in-order-short-circuit-at-first-failure)
-- [Credential Storage](#credential-storage)
-- [License](#license)
-
-## Quick start (Windows)
+## 🚀 Quick start (Windows)
 
 1. Clone this repo (or open `D:/bian`).
-2. Double-click `run.bat`.
-3. Browser opens to `http://localhost:5173` — first time, follow the API key setup wizard.
+2. Double-click `run.bat`. Browser opens to `http://localhost:5173`.
+3. First time: follow the API-key setup wizard. Keys are stored encrypted in the **OS keyring** (Windows Credential Manager), never in `.env` or the repo.
 
-## Configuration
+For 24/7 unattended operation (auto-start on boot, restart on crash):
 
-Settings are stored encrypted in `data/app.db` (via OS keyring). Configure via the UI's **Settings** page; no plaintext keys live in this repo.
+```cmd
+pip install pywin32
+python scripts/windows_service.py install
+python scripts/windows_service.py start
+```
 
-## Testing
+## 🧪 Testing
 
 ```bash
 python -m venv venv
@@ -81,164 +91,59 @@ pip install -r requirements.txt
 pytest -q
 ```
 
-## AI Trader
+Current suite: **193 tests** across `tests/unit/` and `tests/integration/`.
 
-> **Status:** The backend (`/api/ai-trader/*`) is implemented per `docs/superpowers/specs/2026-09-01-ai-trader-design.md` and tested (129 unit + integration tests passing). The mock UI page is rendered; treating its buttons as illustrative until they are wired to the backend.
-
-### Cold-start state
-
-Right now the OS keyring holds Binance credentials but **no** LLM credentials, so a fresh start reports:
+For the AI Trader backtest demo:
 
 ```bash
-curl http://localhost:8000/api/ai-trader/status
-# → broker_wired: true, llm_wired: false, wiring_ok: false
-# → armed_for_live_at: null,  status: idle,  poll_interval_sec: 60
-curl -i 'http://localhost:8000/api/ai-trader/dry-run?symbol=BTCUSDT'
-# → HTTP/1.1 503  {"detail":"trader_not_wired"}
+pytest tests/unit/test_backtest.py -v
+# Then: docs/backtests/backtest-YYYYMMDD-HHMMSS-xxxxxx.html
 ```
 
-The first step of any hands-on run is wiring LLM credentials. `wiring_ok` only flips to `true` once **both** `broker_wired` and `llm_wired` are `true` — `wiring_ok` is a derived property, not a stored flag.
+## 📊 Backtest demo
 
-### Enabling on Testnet (recommended first)
+Run the backtest against recorded live decisions:
 
-1. **Settings → LLM Configuration.** Provide `Base URL` + `API Key` (any OpenAI-compatible endpoint works: DeepSeek, OpenAI, Moonshot, …). `Model` is optional. Save. The card's badges now read `llm_wired true`.
-2. **Settings → API key & Secret.** With `Testnet = on`, paste your Binance testnet API key + secret. Save. Run **Test connection** to confirm.
-3. **Open the AI Trader tab.** Review the risk caps displayed in the Risk caps card. Defaults (testnet tier): per-order 50 USDT, per-symbol 500 USDT, daily loss -30 USDT, daily trades 20, symbols `["BTCUSDT"]`, poll 60 s. Edit them via:
+```python
+from app.backtest.runner import run_backtest
 
-   ```bash
-   curl -X PUT http://localhost:8000/api/ai-trader/settings \
-     -H 'content-type: application/json' \
-     -d '{"max_order_quote_usdt": 50, "max_position_per_symbol_usdt": 500, "daily_loss_cap_usdt": -30, "daily_max_trades": 20, "symbols": ["BTCUSDT"]}'
-   ```
-
-   `daily_loss_cap_usdt` must be **strictly negative**; `max_order_quote_usdt` and `max_position_per_symbol_usdt` must be **> 0**; `daily_max_trades >= 1`; `poll_interval_sec >= 1`. The router rejects values that would invert a guard.
-4. **Click ENABLE AI TRADER.** The service starts polling every 60 s. `GET /api/ai-trader/status` now shows `status: running`.
-5. **Watch Logs / Decisions:**
-
-   ```bash
-   curl 'http://localhost:8000/api/ai-trader/decisions?limit=50'
-   ```
-
-   For the first 30 minutes, watch for `outcome ∈ {placed, rejected, no_trade, error}`.
-6. **Let it run 24 h.** Verify P&L stays within caps and no trip fires. Adjust caps only if you have a reason; the defaults are already conservative for testnet.
-
-### Live mode (after Testnet success)
-
-**Design contract: flipping `settings.testnet` from true to false does NOT by itself arm live trading.** Arming is always a separate, explicit act. Each phase below must be advanced deliberately by a human.
-
-#### Phase 0 — Dry-run
-
-Already covered by the wiring work above. Once `wiring_ok: true` you can run:
-
-```bash
-curl 'http://localhost:8000/api/ai-trader/dry-run?symbol=BTCUSDT'
+result = run_backtest(
+    klines_by_symbol={"BTCUSDT": klines},
+    symbol_info={"BTCUSDT": exchange_info},
+    ai_decision_rows=aidecision_rows,  # from AIDecision table
+    symbols=["BTCUSDT"],
+    report_dir="docs/backtests/",
+)
+print(result.report_path)  # framework-free HTML, opens offline
 ```
 
-It does one LLM round-trip + guard preview, **never** places an order, **never** persists an `AIDecision`. The response includes `ok`, `parsed`, and `guard_verdict`.
+The report contains summary tiles (final equity / total return / Sharpe / max DD / win rate), an ASCII equity curve, and the last 50 fills. Recruiter-friendly: click the link, the page renders, no build step.
 
-#### Phase 1 — Testnet (≥ 24 h with no daily-cap trips)
+## 🛡️ Risk philosophy
 
-Already documented above. Acceptance: no `daily_loss_cap_hit` / `daily_trades_cap_hit` in the Decisions log for a full day; P&L stays within caps; `placed` orders are reproducible from their `prompt` + `raw_response`.
+- **Never request margin / futures / options** — spot only, hard-coded into the system prompt and the parser.
+- **Six sequential guards** short-circuit on the first failure. Guards 4 and 5 also trip the service into `paused` state; guards 2 and 3 reject per-tick only.
+- **Live-arming gate** — flipping `testnet=false` does NOT by itself arm live trading. `armed_for_live_at` is set only when the operator types the exact phrase `I UNDERSTAND REAL MONEY`. The phrase is required on `POST /start` (first arming) and `POST /reset` (recovery when already armed), per `app/services/ai_trader/service.py`.
+- **Conservative live tier** — arming the service for live caps per-order ≤ 20 USDT, per-symbol ≤ 200 USDT, daily loss ≥ -10 USDT, daily trades ≤ 10. Raising these caps is a separate explicit step.
+- **Paper/live isolation** (P0-1) — paper-trading rows carry `is_paper=True` and the daily counters filter by environment. A bad paper morning cannot halt live trading.
+- **FallbackLLM** (P0-4) — single-provider LLM is the biggest 24h risk. The chain trips on HTTP error, empty response, AND parse failure (model degradation). `wiring_ok` and `active_provider_url` are exposed via `/status`.
 
-#### Phase 2 — Live demo (conservative tier)
+## 🗺️ Roadmap
 
-1. Confirm Phase 1 ran ≥ 24 h with no daily-cap trips.
-2. Save real Binance API credentials in **Settings → API key & Secret**, **Testnet = off**. **Do not enable Withdrawals on the Binance API key** — enable trading only. The Settings page never exposes the secret in plaintext; it lives in OS keyring (`binance-spot-grid-bot`, slug `api_secret`).
-3. Open the AI Trader tab. Click **ENABLE AI TRADER** — the UI raises a confirmation dialog asking for the exact phrase `I UNDERSTAND REAL MONEY` (case-sensitive, no trimming). Typing it arms the service for live **and downgrades caps to the conservative live tier**:
-   - per-order ≤ 20 USDT, per-symbol ≤ 200 USDT
-   - daily loss ≥ -10 USDT (i.e. cap is -10, not -30)
-   - daily trades ≤ 10
+The CEO plan (`docs/superpowers/`) defines three tiers of work. This branch ships **all of P0** — the production-readiness foundation. The remaining items (P1+ P2+) build breadth.
 
-   Implemented in `app/services/ai_trader/service.py` via `min(...)` / `max(...)` — raising before arming makes no difference; arming always reduces caps. This is deliberate. All four caps above are downgraded together at arm time, and a cap you already set **stricter** than the conservative tier is left as-is (arming never raises one).
-4. The same confirmation is required on **`POST /api/ai-trader/reset`** when the service is armed for live. From `stopped` or `error`, reset without the phrase is refused with `409 live_arming_required`. When `armed_for_live_at` is null (testnet), reset takes no confirmation — recovering from a transient LLM outage must not demand a real-money incantation.
-
-   ```bash
-   curl -X POST http://localhost:8000/api/ai-trader/start \
-     -H 'content-type: application/json' \
-     -d '{"confirm_text": "I UNDERSTAND REAL MONEY"}'
-   ```
-
-5. Run Phase 2 for ≥ 7 days with no `emergency_stop` and no `status=error`. Review the Decisions log daily.
-
-#### Phase 3 — Live full (raise caps to normal tier)
-
-After ≥ 7 days of Phase 2 with no emergency-stop trips:
-
-```bash
-curl -X PUT http://localhost:8000/api/ai-trader/settings \
-  -H 'content-type: application/json' \
-  -d '{"max_order_quote_usdt": 50, "max_position_per_symbol_usdt": 500, "daily_loss_cap_usdt": -30, "daily_max_trades": 20}'
-```
-
-Normal-tier defaults: per-order 50 USDT, per-symbol 500 USDT, daily loss -30 USDT, daily trades 20. Raise by **one cap at a time**; never relax the daily loss cap below the value Phase 2 had proven safe.
-
-### Emergency stop and recovery
-
-The service has five states: `idle`, `running`, `paused`, `stopped`, `error`. Transitions:
-
-| From | Trigger | To |
+| Tier | Status | Items |
 |---|---|---|
-| idle | `POST /start` | running |
-| running | guard 4 (`daily_loss_cap_hit`) or guard 5 (`daily_trades_cap_hit`) | **paused** (auto, tripwire) |
-| running | 5 consecutive LLM errors | **error** (auto, tripwire) |
-| running | `POST /emergency-stop` | stopped |
-| running | `POST /pause` | paused |
-| paused / error | `POST /resume` | running |
-| stopped / error | `POST /reset` | idle |
+| **P0 — Production foundation** | ✅ shipped | paper/live isolation · background scheduler · JSON logs + trace_id · FallbackLLM · Windows Service · backtest HTML |
+| **P1 — Multi-source signals** | ⏳ next | SignalSource abstraction + Health · Regime (funding / OI) · Technicals (8 indicators) · PaperBroker |
+| **P2 — Demo surface** | ⏳ | News signal (CryptoPanic, default off) · Metrics dashboard with [Backtest][Paper][Live] tabs |
+| **P3 — Hardening** | ⏳ | Local Bearer token auth · Daily DB backup · Audit log privacy |
 
-The tripwire transitions are the ones an operator actually hits:
+Plan source: `docs/superpowers/plans/2026-09-01-ai-trader.md`, design spec `docs/superpowers/specs/2026-09-01-ai-trader-design.md`.
 
-- **Daily loss / trades cap hit** → status becomes `paused`, `status_reason` is `daily_loss_cap_hit` or `daily_trades_cap_hit`. Wait until the next UTC midnight for counters to roll, then `POST /resume` — or `POST /emergency-stop` first if you want a hard freeze.
-- **5 consecutive LLM errors** → status becomes `error`, `status_reason` is `consecutive_llm_errors:N`. The tick loop stops doing work entirely: `tick()` returns immediately while `status != "running"`, so no LLM call is made, no market context is gathered, and no decision rows are written until the service is recovered. Investigate the LLM service, then `POST /reset` to clear.
-- **`POST /emergency-stop`** → status becomes `stopped`, `status_reason` is `emergency_stopped`. Irreversible from the API side; `POST /reset` is the only way back to `idle`.
+## 🧰 Reference projects
 
-Recovery endpoints, in plain curl:
-
-```bash
-# Free a real-money-capable service from stopped/error. The body is required
-# only when armed_for_live_at is set; in testnet the body can be omitted.
-curl -X POST http://localhost:8000/api/ai-trader/reset \
-  -H 'content-type: application/json' \
-  -d '{"confirm_text": "I UNDERSTAND REAL MONEY"}'
-
-# Resume a paused/error service (no confirmation needed).
-curl -X POST http://localhost:8000/api/ai-trader/resume
-```
-
-### Six hard risk guards (run in order, short-circuit at first failure)
-
-Inside `app/services/ai_trader/guards.py::run_all`, each tick evaluates:
-
-| # | Guard | Pass condition |
-|---|---|---|
-| 1 | `schema_valid` | `action ∈ {buy, sell, hold}`; types sane |
-| 2 | `per_order_cap` | `qty * price ≤ max_order_quote_usdt` (holds skipped) |
-| 3 | `position_cap` | current base × price + buy notional ≤ `max_position_per_symbol_usdt` (sells always pass) |
-| 4 | `daily_loss_cap` | `pnl_today ≥ daily_loss_cap_usdt` — fire routes status to `paused` |
-
-Note on `pnl_today` in `/api/ai-trader/status`: it is a cash-flow proxy (revenue of today's `placed` sells minus cost of today's `placed` buys), not realised net P&L — commissions (Binance spot taker ~0.1%) are not subtracted, and cost is the order's price rather than the eventual fill average — so the response carries `pnl_basis: "cash_flow_unadjusted_for_fees"` to make that explicit.
-| 5 | `daily_trade_cap` | `trades_today < daily_max_trades` — fire routes status to `paused` |
-| 6 | `symbol_exclusive` | no open GridTrader orders for this symbol — keeps AI Trader and GridTrader from stacking on the same pair |
-
-The first failure short-circuits `run_all` and the decision is recorded as `outcome: rejected`. Guards 2 and 3 reject per-tick only; guards 4 and 5 also trip the service.
-
-### Credential storage
-
-All secrets go through OS keyring (Windows Credential Manager). Service name: `binance-spot-grid-bot`. Slugs:
-
-| Slug | Used for |
-|---|---|
-| `api_key` | Binance API key |
-| `api_secret` | Binance API secret |
-| `llm_base_url` | LLM endpoint base URL |
-| `llm_api_key` | LLM API key |
-| `llm_model` | LLM model name (optional) |
-
-Precedence on lookup (`app/main.py` lifespan): keyring first, then `app.config` (`pydantic-settings` reading `.env`), then empty. The Settings UI is the only sanctioned write path — never paste keys into a chat, a log, a commit, or any file in the repo.
-
-## License
-
-MIT — see `LICENSE`.
+The `借鉴/` directory at one point held nine cloned open-source projects used as reference. They are intentionally **not tracked** in this repo — see `.gitignore` (`借鉴/` line) — and stay on your local disk for study only. License attribution is preserved in each cloned subdirectory's own `_LICENSE_NOTES.md` file.
 
 ## ⚠️ Disclaimer
 
