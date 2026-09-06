@@ -1,7 +1,67 @@
 # Binance Spot Grid Trading Platform
 
-A local-only automated grid trading bot for Binance Spot (no leverage).
-For learning and personal use.
+> Local-only automated grid trading bot for **Binance Spot (no leverage)** with an optional **AI-Trader** layer driven by any OpenAI-compatible LLM. Designed for learning and personal use, with a **4-phase testnet → live rollout** and **six hard risk guards**.
+
+[![Python](https://img.shields.io/badge/Python-3.11%2B-blue?logo=python&logoColor=white)](https://www.python.org/)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.115-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
+[![SQLite](https://img.shields.io/badge/SQLite-encrypted-003B57?logo=sqlite&logoColor=white)](https://www.sqlite.org/)
+[![Frontend](https://img.shields.io/badge/Frontend-Vite%20%2B%20TS%20%2B%20Tailwind-646CFF?logo=vite&logoColor=white)](https://vitejs.dev/)
+[![Tests](https://img.shields.io/badge/Tests-129%20passing-brightgreen?logo=pytest&logoColor=white)](#testing)
+[![License](https://img.shields.io/badge/License-MIT-lightgrey)](#license)
+[![Exchange](https://img.shields.io/badge/Exchange-Binance%20Spot-F0B90B?logo=binance&logoColor=white)](https://www.binance.com/)
+
+A full-stack quantitative-trading workbench that runs entirely on your machine. The classical **grid engine** posts bids/asks across a price band and profits from oscillation; on top of it sits an **AI-Trader** service that polls an LLM each tick, asks for `buy / sell / hold`, and runs the response through **six sequential risk guards** before any order is placed. Live trading is opt-in, gated by a typed confirmation phrase, and starts at deliberately conservative position caps.
+
+## ✨ Features
+
+- **Grid Engine** — classic spot grid with lifecycle, persistence to the `Order` table, and WebSocket-driven market data.
+- **AI-Trader** — OpenAI-compatible LLM client (DeepSeek / OpenAI / Moonshot / …) with prompt building, JSON parser, and 6 hard guards.
+- **Risk Guards** (`run_all`, short-circuit on first failure): `schema_valid` → `per_order_cap` → `position_cap` → `daily_loss_cap` → `daily_trade_cap` → `symbol_exclusive`.
+- **4-Phase Rollout** — Testnet (default) → Live-demo (conservative caps) → Live-full (normal caps). Flipping `testnet=false` alone **does not** arm live trading — a separate typed confirmation is required.
+- **State Machine** — `idle → running → {paused | stopped | error}` with `POST /pause`, `/resume`, `/emergency-stop`, `/reset`.
+- **Encrypted Credentials** — API keys live in the **OS keyring** (Windows Credential Manager), never in `.env`, logs, or commits.
+- **Setup Wizard** — first-run flow that verifies the broker connection before letting the bot touch anything.
+- **Web Dashboard** — Vite + TypeScript + Tailwind UI at `http://localhost:5173`.
+
+## 🧱 Architecture
+
+```
+┌────────────────────────────────────────────────────────────────────┐
+│                         Frontend (Vite + TS)                       │
+│   Dashboard  ·  Grids  ·  Orders  ·  AI Trader  ·  Settings        │
+└────────────────────────────┬───────────────────────────────────────┘
+                             │  REST + WebSocket
+┌────────────────────────────▼───────────────────────────────────────┐
+│                          FastAPI backend                           │
+│  routers/  →  services/  →  broker/binance.py  →  SQLite (app.db)  │
+│                                                                    │
+│  ┌──────────────┐    every 60s    ┌────────────────────────────┐   │
+│  │ AI Trader    │ ──────────────► │  6 Guards (short-circuit)  │   │
+│  │ service.py   │ ◄────────────── │  → buy / sell / hold       │   │
+│  └──────────────┘   parsed JSON   └────────────────────────────┘   │
+│                                                                    │
+│  ┌──────────────┐                                                  │
+│  │ Grid Engine  │  posts limit orders across the price band       │
+│  └──────────────┘                                                  │
+└────────────────────────────────────────────────────────────────────┘
+                             │
+                             ▼
+                    Binance Spot API (no leverage)
+```
+
+## 📑 Table of Contents
+
+- [Quick Start](#quick-start-windows)
+- [Configuration](#configuration)
+- [Testing](#testing)
+- [Architecture & Layout](#architecture)
+- [AI Trader — Cold-Start](#ai-trader)
+- [Testnet → Live Rollout](#enabling-on-testnet-recommended-first) · [Phase 2 Live-demo](#phase-2--live-demo-conservative-tier) · [Phase 3 Live-full](#phase-3--live-full-raise-caps-to-normal-tier)
+- [Emergency Stop & Recovery](#emergency-stop-and-recovery)
+- [Six Risk Guards](#six-hard-risk-guards-run-in-order-short-circuit-at-first-failure)
+- [Credential Storage](#credential-storage)
+- [Reference Projects](#reference-projects)
+- [License](#license)
 
 ## Quick start (Windows)
 
@@ -180,3 +240,11 @@ All secrets go through OS keyring (Windows Credential Manager). Service name: `b
 | `llm_model` | LLM model name (optional) |
 
 Precedence on lookup (`app/main.py` lifespan): keyring first, then `app.config` (`pydantic-settings` reading `.env`), then empty. The Settings UI is the only sanctioned write path — never paste keys into a chat, a log, a commit, or any file in the repo.
+
+## License
+
+MIT — see `LICENSE`. The bundled `借鉴/` reference projects retain their original licenses; consult each subfolder before redistribution.
+
+## ⚠️ Disclaimer
+
+This software is for **educational and personal use only**. Cryptocurrency trading carries significant financial risk. The author is not responsible for any losses incurred while using this tool. Always start on **testnet**, run for at least 24 hours, and never trade with funds you cannot afford to lose. Do **not** enable Withdrawals on any API key you paste into the Settings page.
