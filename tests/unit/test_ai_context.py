@@ -47,3 +47,57 @@ def test_gather_uses_kline_close_as_fallback_price():
 
     snap = gather(NoClose(), "BTCUSDT", grid_has_open_orders=lambda s: False)
     assert snap["price"] == 0.0  # no price available
+
+
+def _broker_obj(**methods):
+    """Return a simple object with the listed methods (no self binding)."""
+    obj = type("B", (), {})()
+    for name, fn in methods.items():
+        setattr(obj, name, fn)
+    return obj
+
+
+def test_gather_futures_includes_mark_price_and_position():
+    broker = _broker_obj(
+        get_klines=lambda symbol, interval, limit: [],
+        get_account_info=lambda: {"balances": [], "availableBalance": "1000.0"},
+        get_open_orders=lambda symbol=None: [],
+        get_mark_price=lambda symbol: {"markPrice": "67238.20"},
+        get_position_risk=lambda symbol: [{
+            "positionAmt": "0.05",
+            "entryPrice": "66500",
+            "leverage": "5",
+        }],
+    )
+    out = gather(broker, "BTCUSDT",
+                 grid_has_open_orders=lambda s: False,
+                 market_type="futures")
+    assert out["mark_price"] == 67238.20
+    assert out["available_margin_usdt"] == 1000.0
+    assert out["current_position_qty"] == 0.05
+    assert out["current_position_entry_price"] == 66500.0
+    assert out["current_position_leverage"] == 5
+
+
+def test_gather_futures_no_position():
+    broker = _broker_obj(
+        get_klines=lambda symbol, interval, limit: [],
+        get_account_info=lambda: {"balances": [], "availableBalance": "1000.0"},
+        get_open_orders=lambda symbol=None: [],
+        get_mark_price=lambda symbol: {"markPrice": "67238.20"},
+        get_position_risk=lambda symbol: [],
+    )
+    out = gather(broker, "BTCUSDT",
+                 grid_has_open_orders=lambda s: False,
+                 market_type="futures")
+    assert out["current_position_qty"] == 0
+    assert out["current_position_entry_price"] == 0
+
+
+def test_gather_spot_excludes_futures_keys():
+    snap = gather(FakeBroker(), "BTCUSDT",
+                  grid_has_open_orders=lambda s: False,
+                  market_type="spot")
+    assert "mark_price" not in snap
+    assert "available_margin_usdt" not in snap
+    assert "current_position_qty" not in snap
