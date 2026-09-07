@@ -846,3 +846,30 @@ def test_reset_armed_with_confirm_absent_refused(monkeypatch, client):
     assert r2.status_code == 409
     assert r2.json()["error"] == "live_arming_required"
     assert client.get("/api/ai-trader/status").json()["status"] == "stopped"
+
+
+# -- Task 10: PUT /settings accepts futures-mode fields ----
+
+def test_put_settings_writes_market_type_leverage_margin(client):
+    r = client.put("/api/ai-trader/settings", json={
+        "market_type": "futures",
+        "leverage": 5,
+        "margin_type": "ISOLATED",
+    })
+    assert r.status_code == 200
+    with SessionLocal() as s:
+        from app.models.ai_settings import load_or_create
+        row = load_or_create(s)
+        assert row.market_type == "futures"
+        assert row.leverage == 5
+        assert row.margin_type == "ISOLATED"
+
+
+def test_put_settings_rejects_invalid_leverage(client):
+    r = client.put("/api/ai-trader/settings", json={"leverage": 200})
+    assert r.status_code == 422  # Pydantic enforces ge=1, le=125
+
+
+def test_put_settings_rejects_invalid_market_type(client):
+    r = client.put("/api/ai-trader/settings", json={"market_type": "options"})
+    assert r.status_code == 422  # Literal["spot","futures"]

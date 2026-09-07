@@ -7,7 +7,7 @@ live-arming gate) added in Task 12.
 from __future__ import annotations
 
 from datetime import datetime, UTC
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
@@ -187,6 +187,21 @@ class _SettingsUpdate(BaseModel):
         ge=1,
         description="Tick interval in seconds. Must be >= 1 to avoid busy-looping.",
     )
+    # Futures-only fields (Task 10). market_type controls which client the
+    # lifespan wires and which guards run. leverage/margin_type are
+    # validated by the literal type below.
+    market_type: Literal["spot", "futures"] | None = None
+    leverage: int | None = Field(
+        default=None,
+        ge=1,
+        le=125,
+        description=(
+            "Fixed leverage (futures only). 1-125x; Binance per-symbol "
+            "max may be lower — the leverage_validation guard surfaces "
+            "that as an audit-row reason."
+        ),
+    )
+    margin_type: Literal["ISOLATED", "CROSSED"] | None = None
 
 
 @router.post("/start")
@@ -306,6 +321,12 @@ def put_settings(body: _SettingsUpdate) -> dict[str, Any]:
             row.symbol_list = normalised
         if body.poll_interval_sec is not None:
             row.poll_interval_sec = int(body.poll_interval_sec)
+        if body.market_type is not None:
+            row.market_type = body.market_type
+        if body.leverage is not None:
+            row.leverage = int(body.leverage)
+        if body.margin_type is not None:
+            row.margin_type = body.margin_type
         row.updated_at = datetime.now(UTC)
         s.commit()
     return {"ok": True}
