@@ -44,3 +44,7 @@ class AIDecision(Base):
         index=True,
         server_default="0",
     )
+    market_type: Mapped[str] = mapped_column(
+        String, default="spot", nullable=False, index=True
+    )
+    leverage: Mapped[int | None] = mapped_column(Integer, nullable=True)

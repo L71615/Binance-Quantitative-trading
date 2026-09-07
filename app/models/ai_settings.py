@@ -28,6 +28,9 @@ class AISettings(Base):
     daily_max_trades: Mapped[int] = mapped_column(Integer, default=20, nullable=False)
     symbols: Mapped[str] = mapped_column(String, default='["BTCUSDT"]', nullable=False)
     poll_interval_sec: Mapped[int] = mapped_column(Integer, default=60, nullable=False)
+    market_type: Mapped[str] = mapped_column(String, default="spot", nullable=False)
+    leverage: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    margin_type: Mapped[str] = mapped_column(String, default="ISOLATED", nullable=False)
     llm_model: Mapped[str | None] = mapped_column(String, nullable=True)
     consecutive_llm_errors: Mapped[int] = mapped_column(
         Integer, default=0, nullable=False

@@ -57,6 +57,71 @@ def _migrate_ai_decision_is_paper(engine: Engine) -> None:
     log.info("migration: ai_decision.is_paper added")
 
 
+def _migrate_ai_settings_market_type(engine: Engine) -> None:
+    """Add market_type column to ai_settings. Idempotent."""
+    if _has_column(engine, "ai_settings", "market_type"):
+        return
+    log.info("migration: adding ai_settings.market_type")
+    with engine.begin() as conn:
+        conn.execute(text(
+            'ALTER TABLE "ai_settings" ADD COLUMN market_type VARCHAR NOT NULL DEFAULT \'spot\''
+        ))
+
+
+def _migrate_ai_settings_leverage(engine: Engine) -> None:
+    """Add leverage column to ai_settings. NULL for spot rows."""
+    if _has_column(engine, "ai_settings", "leverage"):
+        return
+    log.info("migration: adding ai_settings.leverage")
+    with engine.begin() as conn:
+        conn.execute(text(
+            'ALTER TABLE "ai_settings" ADD COLUMN leverage INTEGER'
+        ))
+
+
+def _migrate_ai_settings_margin_type(engine: Engine) -> None:
+    """Add margin_type column to ai_settings. Default 'ISOLATED'."""
+    if _has_column(engine, "ai_settings", "margin_type"):
+        return
+    log.info("migration: adding ai_settings.margin_type")
+    with engine.begin() as conn:
+        conn.execute(text(
+            'ALTER TABLE "ai_settings" ADD COLUMN margin_type VARCHAR NOT NULL DEFAULT \'ISOLATED\''
+        ))
+
+
+def _migrate_ai_decision_market_type(engine: Engine) -> None:
+    """Add market_type column to ai_decision for audit-row market tagging."""
+    if _has_column(engine, "ai_decision", "market_type"):
+        return
+    log.info("migration: adding ai_decision.market_type")
+    with engine.begin() as conn:
+        conn.execute(text(
+            'ALTER TABLE "ai_decision" ADD COLUMN market_type VARCHAR NOT NULL DEFAULT \'spot\''
+        ))
+    with engine.begin() as conn:
+        conn.execute(text(
+            'CREATE INDEX IF NOT EXISTS "ix_ai_decision_market_type" '
+            'ON "ai_decision" (market_type)'
+        ))
+
+
+def _migrate_ai_decision_leverage(engine: Engine) -> None:
+    """Add leverage column to ai_decision. NULL for spot rows."""
+    if _has_column(engine, "ai_decision", "leverage"):
+        return
+    log.info("migration: adding ai_decision.leverage")
+    with engine.begin() as conn:
+        conn.execute(text(
+            'ALTER TABLE "ai_decision" ADD COLUMN leverage INTEGER'
+        ))
+
+
 def run_all_migrations(engine: Engine) -> None:
     """Run every migration in order. Add new ones to the bottom."""
     _migrate_ai_decision_is_paper(engine)
+    _migrate_ai_settings_market_type(engine)
+    _migrate_ai_settings_leverage(engine)
+    _migrate_ai_settings_margin_type(engine)
+    _migrate_ai_decision_market_type(engine)
+    _migrate_ai_decision_leverage(engine)
