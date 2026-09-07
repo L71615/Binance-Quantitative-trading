@@ -5,7 +5,10 @@ from __future__ import annotations
 import keyring
 import keyring.errors
 
-SERVICE_NAME = "binance-spot-grid-bot"
+# Renamed from "binance-spot-grid-bot" (2026-09-07) when futures support
+# was added. Binance Spot + USDⓈ-M Futures share the same API key+secret,
+# so they should share one keyring namespace.
+SERVICE_NAME = "binance-trading-bot"
 
 
 def save_secret(slug: str, value: str) -> None:
