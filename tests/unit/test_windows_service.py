@@ -22,9 +22,16 @@ def test_service_constants_pinned():
     """These names are written to the Windows registry during install.
     Renaming them silently orphans the install — pin to catch accidental
     edits."""
-    assert svc.SERVICE_NAME == "BinanceSpotGridAI"
-    assert "Binance Spot Grid" in svc.SERVICE_DISPLAY
+    assert svc.SERVICE_NAME == "BinanceGridAI"
+    assert "Binance Grid" in svc.SERVICE_DISPLAY
     assert 1 <= svc.COOLDOWN_SEC <= 60  # not 0, not absurdly long
+
+
+def test_old_service_name_is_aliased():
+    """Old install name 'BinanceSpotGridAI' maps to the new canonical
+    name so existing service installs upgrade without breakage."""
+    from scripts.windows_service import _SERVICE_NAME_ALIASES
+    assert _SERVICE_NAME_ALIASES["BinanceSpotGridAI"] == "BinanceGridAI"
 
 
 def test_uvicorn_command_shape():

@@ -46,8 +46,17 @@ from pathlib import Path
 
 logger = logging.getLogger("app.service_wrapper")
 
-SERVICE_NAME = "BinanceSpotGridAI"
-SERVICE_DISPLAY = "Binance Spot Grid AI Trader"
+SERVICE_NAME = "BinanceGridAI"
+SERVICE_DISPLAY = "Binance Grid + AI-Trader"
+
+# Backwards-compatibility aliases — old install names map to the new
+# canonical name so existing service installs upgrade without breakage.
+# `HandleCommandLine(_BinanceGridService)` registers under _svc_name_
+# (the new name); the alias dict exists for install-time ergonomics
+# and any code that reads back the canonical name from a legacy arg.
+_SERVICE_NAME_ALIASES = {
+    "BinanceSpotGridAI": "BinanceGridAI",
+}
 
 # How long to wait between uvicorn exits before relaunching. Short enough
 # to recover quickly from transient crashes, long enough that an outright
@@ -79,7 +88,7 @@ def _run_uvicorn_subprocess() -> subprocess.Popen:
 
 # ----- pywin32 service class (only used when SCM calls ServiceMain) ------------
 
-class _BinanceSpotGridService:
+class _BinanceGridService:
     """Concrete SCM service class. Imported lazily so the module loads
     cleanly on machines without pywin32. The SCM dispatches by class name
     string in the `SvcDoRun` registration below."""
@@ -87,8 +96,8 @@ class _BinanceSpotGridService:
     _svc_name_ = SERVICE_NAME
     _svc_display_name_ = SERVICE_DISPLAY
     _svc_description_ = (
-        "Runs the Binance Spot Grid + AI Trader service 24/7. "
-        "Restarts on crash. Stop with `sc stop BinanceSpotGridAI`."
+        "Runs the Binance Spot / Futures Grid + AI Trader service 24/7. "
+        "Restarts on crash. Stop with `sc stop BinanceGridAI`."
     )
 
     def __init__(self):
@@ -160,7 +169,7 @@ def _install() -> None:
     except ImportError:
         print("pywin32 not installed. Run: pip install pywin32", file=sys.stderr)
         sys.exit(2)
-    win32serviceutil.HandleCommandLine(_BinanceSpotGridService)
+    win32serviceutil.HandleCommandLine(_BinanceGridService)
 
 
 if __name__ == "__main__":
