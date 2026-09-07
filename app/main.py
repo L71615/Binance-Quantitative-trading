@@ -89,18 +89,33 @@ async def lifespan(app: FastAPI):
     # KeyError, etc.) is a programmer error and must propagate so a typo
     # doesn't silently disable live trading.
     try:
-        from app.broker.binance import BinanceClient
+        from app.broker import BinanceClient, BinanceFuturesClient
         from app.config import get_settings
         from app.crypto_store import load_secret
+        from app.models.ai_settings import load_or_create
         from app.services.ai_trader.service import trader as ai_trader
         from app.services.llm import LLMClient
         cfg = get_settings()
         api_key = load_secret("api_key") or ""
         api_secret = load_secret("api_secret") or ""
         if api_key and api_secret:
-            ai_trader.set_broker(
-                BinanceClient(api_key, api_secret, testnet=cfg.binance_testnet)
-            )
+            # Pick the right client based on the configured market_type.
+            # Default 'spot' keeps the historical behaviour; 'futures' wires
+            # the USDⓈ-M client that the futures guards depend on.
+            with SessionLocal() as s:
+                _mt = load_or_create(s).market_type
+            if _mt == "futures":
+                ai_trader.set_broker(
+                    BinanceFuturesClient(
+                        api_key, api_secret, testnet=cfg.binance_testnet
+                    )
+                )
+            else:
+                ai_trader.set_broker(
+                    BinanceClient(
+                        api_key, api_secret, testnet=cfg.binance_testnet
+                    )
+                )
         else:
             # No creds — cold start. Service is bootable but not wired.
             ai_trader.set_broker(None)
@@ -154,7 +169,7 @@ async def lifespan(app: FastAPI):
         await lifecycle.stop()
 
 
-app = FastAPI(lifespan=lifespan, title="Binance Spot Grid Bot")
+app = FastAPI(lifespan=lifespan, title="Binance Spot / Futures AI Trader")
 
 app.add_middleware(
     CORSMiddleware,
