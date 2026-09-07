@@ -76,6 +76,115 @@ def symbol_exclusive(
     return _pass()
 
 
+# ---- Futures-specific guards (Task 5) ----
+
+def leverage_validation(parsed: dict, ctx: dict, settings, *, broker) -> GuardResult:
+    """Confirm exchange-side leverage matches settings.leverage.
+
+    Binance's set_leverage is idempotent — calling with the current value
+    is a no-op. We only call it when:
+      - No position exists for this symbol yet, OR
+      - Position exists but its leverage differs from settings.leverage.
+
+    Failure mode: set_leverage raises (e.g. 403 leverage too high for
+    the symbol). We trip the guard, the audit row carries the reason,
+    and the operator must lower settings.leverage.
+    """
+    try:
+        positions = broker.get_position_risk(parsed["symbol"])
+        if positions:
+            current_lev = int(positions[0].get("leverage", 0))
+        else:
+            current_lev = 0
+        if current_lev != int(settings.leverage or 0):
+            broker.set_leverage(parsed["symbol"], int(settings.leverage))
+    except Exception as e:
+        return GuardResult(
+            False, f"leverage_set_failed:{type(e).__name__}:{e}"
+        )
+    return _pass()
+
+
+def margin_check(
+    parsed: dict, ctx: dict, settings,
+    *, broker, account_info,
+) -> GuardResult:
+    """Verify required initial margin fits within available balance.
+
+    required_margin = notional / leverage. We require it to be ≤ 80% of
+    account_info['availableBalance'] — the standard "never use all your
+    margin" rule. The 0.8 multiplier is hardcoded; settings field could
+    be added later if needed.
+    """
+    if parsed["action"] == "hold":
+        return _pass()
+    notional = abs(float(parsed["qty"]) * float(parsed["price"]))
+    leverage = max(1, int(settings.leverage or 1))
+    required_margin = notional / leverage
+    available = float(account_info.get("availableBalance", 0) or 0)
+    if required_margin > 0.8 * available:
+        return GuardResult(
+            False,
+            f"margin_insufficient:{required_margin:.2f} > 80% of {available:.2f}",
+        )
+    return _pass()
+
+
+def liquidation_distance(parsed: dict, ctx: dict, settings, *, broker) -> GuardResult:
+    """Verify mark price is at least 15% away from estimated liquidation.
+
+    Pure-function liquidation estimate: long entry*(1-1/lev), short
+    entry*(1+1/lev). The 15% threshold is hardcoded; documented as
+    "approximate, intended as early warning" in the design spec.
+
+    If no position exists, passes (liquidation distance is N/A).
+    """
+    if parsed["action"] == "hold":
+        return _pass()
+    try:
+        sym = parsed["symbol"]
+        positions = broker.get_position_risk(sym)
+        if not positions:
+            return _pass()
+        pos = positions[0]
+        pos_amt = float(pos["positionAmt"])
+        if pos_amt == 0:
+            return _pass()
+        entry = float(pos["entryPrice"])
+        mark = float(broker.get_mark_price(sym)["markPrice"])
+        liq = estimate_liq_price(
+            pos_amt, entry, int(settings.leverage or 1), settings.margin_type
+        )
+        distance_pct = abs(mark - liq) / max(mark, 1e-9) * 100
+        if distance_pct < 15.0:
+            return GuardResult(
+                False,
+                f"liquidation_too_close:{distance_pct:.2f}% < 15%",
+            )
+    except Exception as e:
+        return GuardResult(False, f"mark_price_unavailable:{type(e).__name__}:{e}")
+    return _pass()
+
+
+def estimate_liq_price(
+    position_amt: float, entry_price: float, leverage: int, margin_type: str
+) -> float:
+    """Approximate liquidation price (isolated margin formula).
+
+    long:  liq ≈ entry * (1 - 1/leverage)
+    short: liq ≈ entry * (1 + 1/leverage)
+
+    NOT a settlement calculation — Binance's real formula includes
+    maintenance margin rate + wallet balance + fees. This is an
+    early-warning tripwire, not a system of record.
+    """
+    if position_amt == 0 or leverage <= 0 or entry_price <= 0:
+        return 0.0
+    if position_amt > 0:
+        return entry_price * (1 - 1 / leverage)
+    return entry_price * (1 + 1 / leverage)
+
+
 def run_all(
     parsed: dict,
     ctx: dict,
@@ -84,8 +193,11 @@ def run_all(
     pnl_today: float,
     trades_today: int,
     grid_has_open_orders: Callable[[str], bool],
+    market_type: str = "spot",
+    broker=None,
+    account_info=None,
 ) -> tuple[bool, list[GuardResult]]:
-    steps: list[tuple[Callable, dict]] = [
+    base_steps: list[tuple[Callable, dict]] = [
         (schema_valid, {"parsed": parsed, "ctx": ctx}),
         (per_order_cap, {"parsed": parsed, "ctx": ctx, "settings": settings}),
         (position_cap, {"parsed": parsed, "ctx": ctx, "settings": settings}),
@@ -105,6 +217,26 @@ def run_all(
              "grid_has_open_orders": grid_has_open_orders},
         ),
     ]
+    futures_steps: list[tuple[Callable, dict]] = []
+    if market_type == "futures":
+        futures_steps = [
+            (
+                leverage_validation,
+                {"parsed": parsed, "ctx": ctx, "settings": settings,
+                 "broker": broker},
+            ),
+            (
+                margin_check,
+                {"parsed": parsed, "ctx": ctx, "settings": settings,
+                 "broker": broker, "account_info": account_info},
+            ),
+            (
+                liquidation_distance,
+                {"parsed": parsed, "ctx": ctx, "settings": settings,
+                 "broker": broker},
+            ),
+        ]
+    steps = base_steps + futures_steps
     results: list[GuardResult] = []
     for fn, kw in steps:
         r = fn(**kw)
