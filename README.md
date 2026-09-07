@@ -1,6 +1,6 @@
 # Binance Spot Grid + AI-Trader Platform
 
-> Local-only automated trading bot for **Binance Spot (no leverage)**. Classical grid engine plus an **AI-Trader** layer driven by any OpenAI-compatible LLM, designed to run **24/7 unattended** with strict risk discipline. Built as both a usable personal tool and a demoable platform for quant-system interviews.
+> Local-only automated trading bot for **Binance Spot + USDⓈ-M Futures**. Classical grid engine plus an **AI-Trader** layer driven by any OpenAI-compatible LLM, designed to run **24/7 unattended** with strict risk discipline. Built as both a usable personal tool and a demoable platform for quant-system interviews.
 
 [![Python](https://img.shields.io/badge/Python-3.11%2B-blue?logo=python&logoColor=white)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
@@ -58,6 +58,8 @@ A full-stack quantitative-trading workbench that runs entirely on your machine. 
                              │
                              ▼
                     Binance Spot API (no leverage)
+                             + USDⓈ-M Futures API
+                               (market_type switch in Settings)
 ```
 
 Risk guards in order (`app/services/ai_trader/guards.py::run_all`, short-circuit on first failure):
@@ -121,7 +123,9 @@ The report contains summary tiles (final equity / total return / Sharpe / max DD
 
 ## 🛡️ Risk philosophy
 
-- **Never request margin / futures / options** — spot only, hard-coded into the system prompt and the parser.
+- **Never request margin / futures / options** — spot is the default. Futures is an explicit operator-driven switch (`AISettings.market_type = "futures"`); the system prompt and parser never accept a margin request from the LLM.
+- **Fixed leverage** — when futures mode is active, the operator sets `leverage` (1-125x) and `margin_type` (ISOLATED) in Settings. The AI-Trader cannot change leverage mid-run; the LLM decides sides and quantities, never the notional multiple.
+- **Futures-only guards** (when `market_type='futures'`): Guard 7 `leverage_validation` reconciles the exchange's actual leverage with Settings. Guard 8 `margin_check` refuses orders whose required initial margin exceeds 80% of available balance. Guard 9 `liquidation_distance` refuses orders if the mark price is within 15% of the estimated liquidation price for any existing position.
 - **Six sequential guards** short-circuit on the first failure. Guards 4 and 5 also trip the service into `paused` state; guards 2 and 3 reject per-tick only.
 - **Live-arming gate** — flipping `testnet=false` does NOT by itself arm live trading. `armed_for_live_at` is set only when the operator types the exact phrase `I UNDERSTAND REAL MONEY`. The phrase is required on `POST /start` (first arming) and `POST /reset` (recovery when already armed), per `app/services/ai_trader/service.py`.
 - **Conservative live tier** — arming the service for live caps per-order ≤ 20 USDT, per-symbol ≤ 200 USDT, daily loss ≥ -10 USDT, daily trades ≤ 10. Raising these caps is a separate explicit step.
@@ -135,6 +139,7 @@ The CEO plan (`docs/superpowers/`) defines three tiers of work. This branch ship
 | Tier | Status | Items |
 |---|---|---|
 | **P0 — Production foundation** | ✅ shipped | paper/live isolation · background scheduler · JSON logs + trace_id · FallbackLLM · Windows Service · backtest HTML |
+| **P-futures — Leverage / USDⓈ-M** | ✅ shipped | BinanceFuturesClient · 3 new guards · fixed leverage · market_type switch · ISOLATED margin |
 | **P1 — Multi-source signals** | ⏳ next | SignalSource abstraction + Health · Regime (funding / OI) · Technicals (8 indicators) · PaperBroker |
 | **P2 — Demo surface** | ⏳ | News signal (CryptoPanic, default off) · Metrics dashboard with [Backtest][Paper][Live] tabs |
 | **P3 — Hardening** | ⏳ | Local Bearer token auth · Daily DB backup · Audit log privacy |
