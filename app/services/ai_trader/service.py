@@ -381,8 +381,24 @@ class AITraderService:
             return  # service not fully wired
 
         grid_open_cb = self.grid_has_open_orders
-        snapshot = context.gather(self.broker, symbol, grid_has_open_orders=grid_open_cb)
-        messages = prompt.build_messages(snapshot, symbols_whitelist=[symbol])
+
+        # Load market_type + leverage once per tick so all downstream calls agree.
+        with self._session_factory() as s:
+            row = load_or_create(s)
+            market_type = row.market_type
+            leverage = row.leverage
+
+        snapshot = context.gather(
+            self.broker, symbol,
+            grid_has_open_orders=grid_open_cb,
+            market_type=market_type,
+        )
+        messages = prompt.build_messages(
+            snapshot,
+            symbols_whitelist=[symbol],
+            market_type=market_type,
+            leverage=leverage or 1,
+        )
 
         prompt_text = "\n".join(m["content"] for m in messages)
         market_json = json.dumps({k: snapshot[k] for k in snapshot if k != "klines_summary"})[:500]
@@ -442,6 +458,15 @@ class AITraderService:
         with self._session_factory() as s:
             row = load_or_create(s)
             settings = row
+
+        # Fetch account_info once per tick (futures only) for margin_check.
+        account_info: dict = {}
+        if market_type == "futures":
+            try:
+                account_info = self.broker.get_account_info() or {}
+            except Exception:
+                account_info = {}
+
         ok, results = guards.run_all(
             parsed,
             {"current_price": snapshot["price"],
@@ -454,6 +479,9 @@ class AITraderService:
             pnl_today=pnl_today,
             trades_today=trades_today,
             grid_has_open_orders=grid_open_cb,
+            market_type=market_type,
+            broker=self.broker if market_type == "futures" else None,
+            account_info=account_info if market_type == "futures" else None,
         )
         guard_results_json = json.dumps(
             [{"ok": r.ok, "reason": r.reason} for r in results]
@@ -580,6 +608,11 @@ class AITraderService:
         # remember to pass it. CEO plan OV-C: paper P&L must be partitioned
         # from live at the audit-row level so the daily counters stay clean.
         kw.setdefault("is_paper", self.is_paper)
+        # market_type + leverage are read from settings once per tick and
+        # passed explicitly. Defaults preserve the call shape for any test
+        # that doesn't supply them.
+        kw.setdefault("market_type", "spot")
+        kw.setdefault("leverage", None)
         from app.models.ai_decision import AIDecision
         with self._session_factory() as s:
             s.add(AIDecision(**kw))

@@ -658,3 +658,87 @@ def test_grid_has_open_orders_false_when_no_orders_and_no_symbol_leak(
         "every symbol is blocked' bug would leak BTCUSDT's open order onto "
         "ETHUSDT and silently disable half the AI Trader's universe"
     )
+
+
+# -- Task 8: futures-mode tick threads market_type through the pipeline -----
+
+@pytest.mark.asyncio
+async def test_tick_passes_market_type_to_run_all_in_futures_mode(_fresh_state):
+    """Under market_type='futures', _tick_symbol must invoke guards.run_all
+    with market_type='futures', broker=<futures client>, account_info=<dict>."""
+    from app.services.ai_trader import guards as guards_mod
+    captured = {}
+
+    def spy_run_all(parsed, ctx, settings, **kw):
+        captured.update(kw)
+        captured["_settings_market_type"] = getattr(settings, "market_type", None)
+        return True, []
+
+    original = guards_mod.run_all
+    guards_mod.run_all = spy_run_all
+    try:
+        # Configure futures mode in settings.
+        with SessionLocal() as s:
+            from app.models.ai_settings import load_or_create
+            row = load_or_create(s)
+            row.status = "running"
+            row.symbols = '["BTCUSDT"]'
+            row.market_type = "futures"
+            row.leverage = 5
+            s.commit()
+
+        s_svc = AITraderService(
+            llm=FakeLLM([json.dumps(
+                {"action": "hold", "symbol": "BTCUSDT", "qty": 0, "price": 0,
+                 "reason": "futures hold test"})]),
+            broker=FakeBroker(),
+        )
+        await s_svc.tick()
+    finally:
+        guards_mod.run_all = original
+
+    assert captured.get("market_type") == "futures", (
+        f"guards.run_all must receive market_type='futures'; got {captured!r}"
+    )
+    assert captured.get("broker") is not None, (
+        "futures-mode tick must pass the broker into run_all for guards 7/8/9"
+    )
+    assert captured.get("account_info") is not None
+    assert captured["_settings_market_type"] == "futures"
+
+
+@pytest.mark.asyncio
+async def test_tick_passes_market_type_to_prompt_in_futures_mode(_fresh_state):
+    """Under market_type='futures', prompt.build_messages receives
+    market_type='futures' and leverage=5."""
+    from app.services.ai_trader import prompt as prompt_mod
+    captured = {}
+
+    original = prompt_mod.build_messages
+    def spy(snapshot, *, symbols_whitelist, **kw):
+        captured.update(kw)
+        captured["_symbols"] = symbols_whitelist
+        return original(snapshot, symbols_whitelist=symbols_whitelist, **kw)
+    prompt_mod.build_messages = spy
+    try:
+        with SessionLocal() as s:
+            from app.models.ai_settings import load_or_create
+            row = load_or_create(s)
+            row.status = "running"
+            row.symbols = '["BTCUSDT"]'
+            row.market_type = "futures"
+            row.leverage = 5
+            s.commit()
+
+        s_svc = AITraderService(
+            llm=FakeLLM([json.dumps(
+                {"action": "hold", "symbol": "BTCUSDT", "qty": 0, "price": 0,
+                 "reason": "prompt test"})]),
+            broker=FakeBroker(),
+        )
+        await s_svc.tick()
+    finally:
+        prompt_mod.build_messages = original
+
+    assert captured.get("market_type") == "futures"
+    assert captured.get("leverage") == 5
